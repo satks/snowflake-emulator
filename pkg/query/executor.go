@@ -31,6 +31,7 @@ type Executor struct {
 	translator     *Translator
 	copyProcessor  *CopyProcessor
 	mergeProcessor *MergeProcessor
+	catalogMode    bool
 }
 
 // ExecutorOption configures an Executor.
@@ -48,6 +49,18 @@ func WithMergeProcessor(processor *MergeProcessor) ExecutorOption {
 	return func(e *Executor) {
 		e.mergeProcessor = processor
 	}
+}
+
+// WithCatalogMode enables catalog mode (ATTACH-based database management).
+func WithCatalogMode(enabled bool) ExecutorOption {
+	return func(e *Executor) {
+		e.catalogMode = enabled
+	}
+}
+
+// IsCatalogMode returns whether the executor is in catalog mode.
+func (e *Executor) IsCatalogMode() bool {
+	return e.catalogMode
 }
 
 // NewExecutor creates a new query executor.
@@ -300,6 +313,34 @@ func (e *Executor) Execute(ctx context.Context, sql string) (*ExecResult, error)
 	// Use classifier to detect DDL statements that need metadata tracking
 	classifier := NewClassifier()
 
+	// Catalog mode: intercept database/schema/table DDL and USE statements
+	if e.catalogMode {
+		if classifier.IsCreateDatabase(sql) {
+			return e.executeCreateDatabase(ctx, sql)
+		}
+		if classifier.IsDropDatabase(sql) {
+			return e.executeDropDatabase(ctx, sql)
+		}
+		if classifier.IsCreateSchema(sql) {
+			return e.executeCreateSchemaCatalog(ctx, sql)
+		}
+		if classifier.IsDropSchema(sql) {
+			return e.executeDropSchemaCatalog(ctx, sql)
+		}
+		if classifier.IsUseDatabase(sql) {
+			return e.executeUseDatabase(ctx, sql)
+		}
+		if classifier.IsUseSchema(sql) {
+			return e.executeUseSchema(ctx, sql)
+		}
+		if classifier.IsCreateTable(sql) {
+			return e.executeCreateTableCatalog(ctx, sql)
+		}
+		if classifier.IsDropTable(sql) {
+			return e.executeDropTableCatalog(ctx, sql)
+		}
+	}
+
 	// For CREATE TABLE, we need to register it in metadata
 	if classifier.IsCreateTable(sql) {
 		return e.executeCreateTable(ctx, sql)
@@ -510,6 +551,156 @@ func convertValue(val interface{}) interface{} {
 		// For other types, return as-is
 		return v
 	}
+}
+
+// Catalog mode execution methods
+
+// executeCreateDatabase handles CREATE DATABASE via catalog mode (ATTACH).
+func (e *Executor) executeCreateDatabase(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseCreateDatabase(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CREATE DATABASE: %w", err)
+	}
+
+	_, err = e.repo.CreateDatabaseCatalog(ctx, stmt.Name, "", stmt.IfNotExists)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE DATABASE failed: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeDropDatabase handles DROP DATABASE via catalog mode (DETACH).
+func (e *Executor) executeDropDatabase(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseDropDatabase(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DROP DATABASE: %w", err)
+	}
+
+	if err := e.repo.DropDatabaseCatalog(ctx, stmt.Name, stmt.IfExists); err != nil {
+		return nil, fmt.Errorf("DROP DATABASE failed: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeCreateSchemaCatalog handles CREATE SCHEMA via catalog mode.
+func (e *Executor) executeCreateSchemaCatalog(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseCreateSchema(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CREATE SCHEMA: %w", err)
+	}
+
+	if stmt.Database == "" {
+		return nil, fmt.Errorf("CREATE SCHEMA requires database prefix in catalog mode (e.g., CREATE SCHEMA db.schema)")
+	}
+
+	db, err := e.repo.GetDatabaseByName(ctx, stmt.Database)
+	if err != nil {
+		return nil, fmt.Errorf("database %s not found: %w", stmt.Database, err)
+	}
+
+	_, err = e.repo.CreateSchemaCatalog(ctx, db.ID, stmt.Schema, "", stmt.IfNotExists)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE SCHEMA failed: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeDropSchemaCatalog handles DROP SCHEMA via catalog mode.
+func (e *Executor) executeDropSchemaCatalog(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseDropSchema(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DROP SCHEMA: %w", err)
+	}
+
+	if stmt.Database == "" {
+		return nil, fmt.Errorf("DROP SCHEMA requires database prefix in catalog mode (e.g., DROP SCHEMA db.schema)")
+	}
+
+	db, err := e.repo.GetDatabaseByName(ctx, stmt.Database)
+	if err != nil {
+		if stmt.IfExists {
+			return &ExecResult{RowsAffected: 0}, nil
+		}
+		return nil, fmt.Errorf("database %s not found: %w", stmt.Database, err)
+	}
+
+	schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+	if err != nil {
+		if stmt.IfExists {
+			return &ExecResult{RowsAffected: 0}, nil
+		}
+		return nil, fmt.Errorf("schema %s not found: %w", stmt.Schema, err)
+	}
+
+	if err := e.repo.DropSchemaCatalog(ctx, schema.ID, stmt.IfExists); err != nil {
+		return nil, fmt.Errorf("DROP SCHEMA failed: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeUseDatabase handles USE DATABASE by validating the database exists.
+// Actual session context update happens at the handler layer.
+func (e *Executor) executeUseDatabase(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseUseDatabase(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse USE DATABASE: %w", err)
+	}
+
+	_, err = e.repo.GetDatabaseByName(ctx, stmt.Name)
+	if err != nil {
+		return nil, fmt.Errorf("database %s not found: %w", stmt.Name, err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeUseSchema handles USE SCHEMA by validating the schema name.
+// Actual session context update happens at the handler layer.
+func (e *Executor) executeUseSchema(ctx context.Context, sql string) (*ExecResult, error) {
+	stmt, err := ParseUseSchema(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse USE SCHEMA: %w", err)
+	}
+
+	// We validate the name is parseable but don't fail if schema doesn't exist yet,
+	// since we don't know the current database context at the executor level.
+	_ = stmt
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeCreateTableCatalog handles CREATE TABLE in catalog mode.
+// Passes the SQL through to DuckDB directly (three-part names resolve natively).
+func (e *Executor) executeCreateTableCatalog(ctx context.Context, sql string) (*ExecResult, error) {
+	translatedSQL, err := e.translator.Translate(sql)
+	if err != nil {
+		return nil, fmt.Errorf("translation error: %w", err)
+	}
+
+	if _, err := e.mgr.Exec(ctx, translatedSQL); err != nil {
+		return nil, fmt.Errorf("create table execution error: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
+}
+
+// executeDropTableCatalog handles DROP TABLE in catalog mode.
+// Passes the SQL through to DuckDB directly (three-part names resolve natively).
+func (e *Executor) executeDropTableCatalog(ctx context.Context, sql string) (*ExecResult, error) {
+	translatedSQL, err := e.translator.Translate(sql)
+	if err != nil {
+		return nil, fmt.Errorf("translation error: %w", err)
+	}
+
+	if _, err := e.mgr.Exec(ctx, translatedSQL); err != nil {
+		return nil, fmt.Errorf("drop table execution error: %w", err)
+	}
+
+	return &ExecResult{RowsAffected: 0}, nil
 }
 
 // ExecuteWithHistory wraps Execute with query history tracking.

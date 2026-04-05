@@ -19,6 +19,7 @@ type RestAPIv2Handler struct {
 	stmtMgr      *query.StatementManager
 	repo         *metadata.Repository
 	warehouseMgr *warehouse.Manager
+	catalogMode  bool
 }
 
 // NewRestAPIv2Handler creates a new REST API v2 handler.
@@ -38,6 +39,17 @@ func NewRestAPIv2HandlerWithWarehouse(executor *query.Executor, stmtMgr *query.S
 		stmtMgr:      stmtMgr,
 		repo:         repo,
 		warehouseMgr: warehouseMgr,
+	}
+}
+
+// NewRestAPIv2HandlerWithCatalogMode creates a new REST API v2 handler with catalog mode.
+func NewRestAPIv2HandlerWithCatalogMode(executor *query.Executor, stmtMgr *query.StatementManager, repo *metadata.Repository, catalogMode bool) *RestAPIv2Handler {
+	return &RestAPIv2Handler{
+		executor:     executor,
+		stmtMgr:      stmtMgr,
+		repo:         repo,
+		warehouseMgr: warehouse.NewManager(),
+		catalogMode:  catalogMode,
 	}
 }
 
@@ -331,7 +343,13 @@ func (h *RestAPIv2Handler) CreateDatabase(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	db, err := h.repo.CreateDatabase(ctx, req.Name, req.Comment)
+	var db *metadata.Database
+	var err error
+	if h.catalogMode {
+		db, err = h.repo.CreateDatabaseCatalog(ctx, req.Name, req.Comment, false)
+	} else {
+		db, err = h.repo.CreateDatabase(ctx, req.Name, req.Comment)
+	}
 	if err != nil {
 		h.sendError(w, http.StatusBadRequest, err.Error(), types.SQLState42000)
 		return
@@ -354,14 +372,22 @@ func (h *RestAPIv2Handler) DeleteDatabase(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	dbName := chi.URLParam(r, "database")
 
-	// First, look up the database by name to get its ID
+	if h.catalogMode {
+		if err := h.repo.DropDatabaseCatalog(ctx, dbName, false); err != nil {
+			h.sendError(w, http.StatusNotFound, err.Error(), types.SQLState02000)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Legacy mode: look up by name then drop by ID
 	db, err := h.repo.GetDatabaseByName(ctx, dbName)
 	if err != nil {
 		h.sendError(w, http.StatusNotFound, "Database not found", types.SQLState02000)
 		return
 	}
 
-	// Now drop using the ID
 	if err := h.repo.DropDatabase(ctx, db.ID); err != nil {
 		h.sendError(w, http.StatusInternalServerError, err.Error(), types.SQLState42000)
 		return
@@ -456,7 +482,12 @@ func (h *RestAPIv2Handler) CreateSchema(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	schema, err := h.repo.CreateSchema(ctx, db.ID, req.Name, req.Comment)
+	var schema *metadata.Schema
+	if h.catalogMode {
+		schema, err = h.repo.CreateSchemaCatalog(ctx, db.ID, req.Name, req.Comment, false)
+	} else {
+		schema, err = h.repo.CreateSchema(ctx, db.ID, req.Name, req.Comment)
+	}
 	if err != nil {
 		h.sendError(w, http.StatusBadRequest, err.Error(), types.SQLState42000)
 		return

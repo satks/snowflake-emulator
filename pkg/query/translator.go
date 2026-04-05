@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/blastrain/vitess-sqlparser/sqlparser"
@@ -120,10 +121,10 @@ func (t *Translator) Translate(sql string) (string, error) {
 	// Parse the SQL statement into an AST
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
-		// If parsing fails, return original SQL
-		// DuckDB might handle some Snowflake syntax directly
-		// This provides graceful degradation for unsupported syntax
-		return sql, nil
+		// AST parsing failed (e.g., three-part names like "DB"."SCHEMA"."TABLE").
+		// Apply string-based function translations as fallback so Snowflake
+		// functions (IFF, NVL, etc.) still get translated.
+		return t.applyStringFallbackTranslations(sql), nil
 	}
 
 	// Walk the AST and transform functions in-place
@@ -150,6 +151,37 @@ func (t *Translator) Translate(sql string) (string, error) {
 	result = t.handleComplexTransformations(result)
 
 	return result, nil
+}
+
+// applyStringFallbackTranslations applies simple Snowflake→DuckDB function renames
+// via string replacement when AST parsing fails (e.g., due to three-part quoted names).
+// This handles the most common function translations that are simple renames.
+func (t *Translator) applyStringFallbackTranslations(sql string) string {
+	// Simple function renames using case-insensitive regex.
+	// We match the function name followed by '(' to avoid replacing substrings.
+	replacements := []struct {
+		from *regexp.Regexp
+		to   string
+	}{
+		{regexp.MustCompile(`(?i)\bIFF\s*\(`), "IF("},
+		{regexp.MustCompile(`(?i)\bNVL\s*\(`), "COALESCE("},
+		{regexp.MustCompile(`(?i)\bIFNULL\s*\(`), "COALESCE("},
+		{regexp.MustCompile(`(?i)\bLISTAGG\s*\(`), "STRING_AGG("},
+		{regexp.MustCompile(`(?i)\bOBJECT_CONSTRUCT\s*\(`), "json_object("},
+		{regexp.MustCompile(`(?i)\bFLATTEN\s*\(`), "UNNEST("},
+	}
+
+	for _, r := range replacements {
+		sql = r.from.ReplaceAllString(sql, r.to)
+	}
+
+	// Also apply the post-processing transformations
+	sql = strings.ReplaceAll(sql, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
+	sql = strings.ReplaceAll(sql, "current_timestamp()", "CURRENT_TIMESTAMP")
+	sql = strings.ReplaceAll(sql, "CURRENT_DATE()", "CURRENT_DATE")
+	sql = strings.ReplaceAll(sql, "current_date()", "CURRENT_DATE")
+
+	return sql
 }
 
 // handleComplexTransformations handles transformations that require more than simple renames.

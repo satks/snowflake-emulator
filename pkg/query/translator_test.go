@@ -741,7 +741,7 @@ func TestTranslator_FLATTEN(t *testing.T) {
 		{
 			name:     "FLATTENWithNamedParam_GracefulDegradation",
 			input:    "SELECT * FROM TABLE(FLATTEN(input => array_col))",
-			expected: "SELECT * FROM TABLE(FLATTEN(input => array_col))", // Parser fails on => syntax
+			expected: "SELECT * FROM TABLE(UNNEST(input => array_col))", // Parser fails on => syntax, fallback applies FLATTEN→UNNEST
 			wantErr:  false,
 		},
 	}
@@ -942,7 +942,7 @@ func TestTranslator_ErrorCases(t *testing.T) {
 			name:             "UnbalancedParentheses_GracefulDegradation",
 			input:            "SELECT IFF(age > 18, 'adult' FROM users",
 			wantErr:          false,
-			expectedContains: "SELECT IFF(age > 18, 'adult' FROM users", // Returns original
+			expectedContains: "SELECT IF(age > 18, 'adult' FROM users", // Fallback applies IFF→IF
 		},
 		{
 			name:             "CompletelyInvalidSQL",
@@ -1030,7 +1030,7 @@ func TestTranslator_EdgeCases(t *testing.T) {
 		{
 			name:     "SubqueryWithFunctions",
 			input:    "SELECT * FROM (SELECT IFF(a, 1, 0) AS flag FROM test) WHERE flag = 1",
-			expected: "SELECT * FROM (SELECT IFF(a, 1, 0) AS flag FROM test) WHERE flag = 1", // Subquery parsing fails, returns original
+			expected: "SELECT * FROM (SELECT IF(a, 1, 0) AS flag FROM test) WHERE flag = 1", // Subquery parsing fails, fallback applies IFF→IF
 			wantErr:  false,
 		},
 		{

@@ -187,6 +187,44 @@ func (r *Repository) resolveTableName(ctx context.Context, databaseName, schemaN
 	return fqtn, nil
 }
 
+// resolveTableNameCatalog resolves a fully qualified table name using three-part catalog naming.
+// Pattern: "database"."schema"."table"
+// Used when catalog mode is enabled (ENABLE_CATALOG_MODE=true).
+func (r *Repository) resolveTableNameCatalog(ctx context.Context, databaseName, schemaName, tableName string) (string, error) {
+	databaseName = strings.ToUpper(databaseName)
+	schemaName = strings.ToUpper(schemaName)
+	tableName = strings.ToUpper(tableName)
+
+	// Verify database exists in metadata
+	db, err := r.metaRepo.GetDatabaseByName(ctx, databaseName)
+	if err != nil {
+		return "", fmt.Errorf("database not found: %w", err)
+	}
+
+	// Verify schema exists in metadata
+	schemas, err := r.metaRepo.ListSchemas(ctx, db.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to list schemas: %w", err)
+	}
+
+	var schema *metadata.Schema
+	for _, s := range schemas {
+		if s.Name == schemaName {
+			schema = s
+			break
+		}
+	}
+
+	if schema == nil {
+		return "", fmt.Errorf("schema %s not found in database %s", schemaName, databaseName)
+	}
+
+	// Build three-part catalog name
+	fqtn := fmt.Sprintf(`"%s"."%s"."%s"`, db.Name, schema.Name, tableName)
+
+	return fqtn, nil
+}
+
 // snowflakeToDuckDBType maps Snowflake data types to DuckDB types.
 func snowflakeToDuckDBType(snowflakeType string) string {
 	// Normalize to uppercase

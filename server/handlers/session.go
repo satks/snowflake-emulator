@@ -15,8 +15,9 @@ import (
 
 // SessionHandler handles session-related HTTP requests.
 type SessionHandler struct {
-	sessionMgr *session.Manager
-	repo       *metadata.Repository
+	sessionMgr  *session.Manager
+	repo        *metadata.Repository
+	catalogMode bool
 }
 
 // RenewSessionRequest represents a session renewal request (legacy).
@@ -63,6 +64,15 @@ func NewSessionHandler(sessionMgr *session.Manager, repo *metadata.Repository) *
 	}
 }
 
+// NewSessionHandlerWithCatalogMode creates a new session handler with catalog mode.
+func NewSessionHandlerWithCatalogMode(sessionMgr *session.Manager, repo *metadata.Repository, catalogMode bool) *SessionHandler {
+	return &SessionHandler{
+		sessionMgr:  sessionMgr,
+		repo:        repo,
+		catalogMode: catalogMode,
+	}
+}
+
 // Login handles login requests with gosnowflake protocol.
 func (h *SessionHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req types.LoginRequest
@@ -93,11 +103,22 @@ func (h *SessionHandler) Login(w http.ResponseWriter, r *http.Request) {
 	// Ensure database exists (try to get it, create if not found)
 	_, err := h.repo.GetDatabaseByName(ctx, database)
 	if err != nil {
-		// Database doesn't exist, create it
-		_, err = h.repo.CreateDatabase(ctx, database, "Auto-created database")
-		if err != nil {
-			sendError(w, apierror.NewSnowflakeError(apierror.CodeInternalError, "Failed to initialize database"))
-			return
+		if h.catalogMode {
+			// Catalog mode: use ATTACH to create database as DuckDB catalog
+			db, createErr := h.repo.CreateDatabaseCatalog(ctx, database, "Auto-created database", true)
+			if createErr != nil {
+				sendError(w, apierror.NewSnowflakeError(apierror.CodeInternalError, "Failed to initialize database"))
+				return
+			}
+			// Ensure schema exists in catalog mode
+			_, _ = h.repo.CreateSchemaCatalog(ctx, db.ID, schema, "Auto-created schema", true)
+		} else {
+			// Legacy mode: create database as DuckDB schema
+			_, err = h.repo.CreateDatabase(ctx, database, "Auto-created database")
+			if err != nil {
+				sendError(w, apierror.NewSnowflakeError(apierror.CodeInternalError, "Failed to initialize database"))
+				return
+			}
 		}
 	}
 
