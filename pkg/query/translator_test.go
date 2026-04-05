@@ -1093,3 +1093,238 @@ func normalizeWhitespace(s string) string {
 	}
 	return result
 }
+
+// TestTranslator_UUID_STRING tests UUID_STRING function translation.
+func TestTranslator_UUID_STRING(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "SimpleUUID",
+			input:    "SELECT UUID_STRING() AS id",
+			expected: "select uuid() as id",
+		},
+		{
+			name:     "UUIDInInsert",
+			input:    "SELECT UUID_STRING(), name FROM users",
+			expected: "select uuid(), name from users",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_SHA2 tests SHA2 function translation.
+func TestTranslator_SHA2(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "SHA2_256",
+			input:    "SELECT SHA2(email, 256) AS hash FROM users",
+			expected: "select sha256(email) as hash from users",
+		},
+		{
+			name:     "SHA2_WithExpression",
+			input:    "SELECT SHA2(CONCAT(first, last), 256) FROM users",
+			expected: "select sha256(CONCAT(first, last)) from users",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_ARRAY_SIZE tests ARRAY_SIZE function translation.
+func TestTranslator_ARRAY_SIZE(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT ARRAY_SIZE(tags) AS cnt FROM items")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select len(tags) as cnt from items"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_ARRAY_CONTAINS tests ARRAY_CONTAINS function translation (arg swap).
+func TestTranslator_ARRAY_CONTAINS(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT ARRAY_CONTAINS('vip', tags) FROM users")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select list_contains(tags, 'vip') from users"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_TRY_TO_DOUBLE tests TRY_TO_DOUBLE function translation.
+func TestTranslator_TRY_TO_DOUBLE(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT TRY_TO_DOUBLE(price_str) AS price FROM items")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select TRY_CAST(price_str AS DOUBLE) as price from items"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_TRY_TO_TIMESTAMP tests TRY_TO_TIMESTAMP function translation.
+func TestTranslator_TRY_TO_TIMESTAMP(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT TRY_TO_TIMESTAMP(ts_str) AS ts FROM events")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select TRY_CAST(ts_str AS TIMESTAMP) as ts from events"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_TO_VARCHAR tests TO_VARCHAR function translation.
+func TestTranslator_TO_VARCHAR(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT TO_VARCHAR(created_at, 'YYYY-MM-DD') AS dt FROM events")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select strftime(created_at, 'YYYY-MM-DD') as dt from events"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_CONVERT_TIMEZONE tests CONVERT_TIMEZONE function translation.
+func TestTranslator_CONVERT_TIMEZONE(t *testing.T) {
+	translator := NewTranslator()
+	result, err := translator.Translate("SELECT CONVERT_TIMEZONE('UTC', 'America/New_York', created_at) AS local_ts FROM events")
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	expected := "select timezone('America/New_York', created_at) as local_ts from events"
+	if diff := cmp.Diff(expected, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_DDLDefaults tests DEFAULT value translation in DDL statements.
+func TestTranslator_DDLDefaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "UUID_STRING_Default",
+			input:    "CREATE TABLE audit (id VARCHAR(36) DEFAULT UUID_STRING() NOT NULL)",
+			expected: "CREATE TABLE audit (id VARCHAR(36) DEFAULT uuid() NOT NULL)",
+		},
+		{
+			name:     "CURRENT_TIMESTAMP_Default",
+			input:    "CREATE TABLE events (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP())",
+			expected: "CREATE TABLE events (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+		},
+		{
+			name:     "Combined_Defaults",
+			input:    "CREATE TABLE log (id VARCHAR DEFAULT UUID_STRING(), ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(), dt DATE DEFAULT CURRENT_DATE())",
+			expected: "CREATE TABLE log (id VARCHAR DEFAULT uuid(), ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, dt DATE DEFAULT CURRENT_DATE)",
+		},
+		{
+			name:     "DDL_Without_Defaults_Unchanged",
+			input:    "CREATE TABLE simple (id INTEGER, name VARCHAR)",
+			expected: "CREATE TABLE simple (id INTEGER, name VARCHAR)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_WindowFunctions tests that window functions pass through correctly.
+// DuckDB natively supports ROW_NUMBER() OVER (...) with NULLS LAST.
+func TestTranslator_WindowFunctions(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "ROW_NUMBER_WithNullsLast",
+			input:    "SELECT ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC NULLS LAST) AS rn FROM orders",
+			expected: "SELECT ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC NULLS LAST) AS rn FROM orders",
+		},
+		{
+			name:     "RANK_Function",
+			input:    "SELECT RANK() OVER (ORDER BY score DESC) AS rnk FROM students",
+			expected: "SELECT RANK() OVER (ORDER BY score DESC) AS rnk FROM students",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_AlterTableClusterBy tests that ALTER TABLE CLUSTER BY passes through.
+func TestTranslator_AlterTableClusterBy(t *testing.T) {
+	translator := NewTranslator()
+	input := `ALTER TABLE "PLANNER"."CURRENT_TABLE" CLUSTER BY ("id")`
+	result, err := translator.Translate(input)
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	// DDL passes through unchanged (except DDL defaults)
+	if diff := cmp.Diff(input, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}

@@ -313,6 +313,11 @@ func (e *Executor) Execute(ctx context.Context, sql string) (*ExecResult, error)
 	// Use classifier to detect DDL statements that need metadata tracking
 	classifier := NewClassifier()
 
+	// ALTER TABLE ... CLUSTER BY is a no-op (DuckDB doesn't support clustering)
+	if classifier.IsAlterTableClusterBy(sql) {
+		return &ExecResult{RowsAffected: 0}, nil
+	}
+
 	// Catalog mode: intercept database/schema/table DDL and USE statements
 	if e.catalogMode {
 		if classifier.IsCreateDatabase(sql) {

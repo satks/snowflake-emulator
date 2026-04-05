@@ -307,3 +307,14 @@ func IsUseDatabase(sql string) bool {
 func IsUseSchema(sql string) bool {
 	return DefaultClassifier.IsUseSchema(sql)
 }
+
+// IsAlterTableClusterBy checks if the SQL is an ALTER TABLE ... CLUSTER BY statement.
+func (c *Classifier) IsAlterTableClusterBy(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "ALTER TABLE") && strings.Contains(upperSQL, "CLUSTER BY")
+}
+
+// IsAlterTableClusterBy is a convenience function to check if SQL is ALTER TABLE CLUSTER BY.
+func IsAlterTableClusterBy(sql string) bool {
+	return DefaultClassifier.IsAlterTableClusterBy(sql)
+}

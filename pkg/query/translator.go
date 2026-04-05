@@ -92,6 +92,58 @@ func (t *Translator) registerFunctions() {
 			return fn
 		},
 	}
+
+	// UUID_STRING() → uuid()
+	t.functionMap["UUID_STRING"] = FunctionTranslator{Name: "uuid"}
+
+	// ARRAY_SIZE(arr) → len(arr)
+	t.functionMap["ARRAY_SIZE"] = FunctionTranslator{Name: "len"}
+
+	// TO_VARCHAR(ts, fmt) → strftime(ts, fmt)
+	t.functionMap["TO_VARCHAR"] = FunctionTranslator{Name: "strftime"}
+
+	// SHA2(expr, bits) → sha256(expr) — drop second arg, rename
+	t.functionMap["SHA2"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("__SHA2__")
+			return fn
+		},
+	}
+
+	// ARRAY_CONTAINS(val, arr) → list_contains(arr, val) — swap args
+	t.functionMap["ARRAY_CONTAINS"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("list_contains")
+			if len(fn.Exprs) == 2 {
+				fn.Exprs[0], fn.Exprs[1] = fn.Exprs[1], fn.Exprs[0]
+			}
+			return fn
+		},
+	}
+
+	// TRY_TO_DOUBLE(expr) → TRY_CAST(expr AS DOUBLE)
+	t.functionMap["TRY_TO_DOUBLE"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("__TRY_TO_DOUBLE__")
+			return fn
+		},
+	}
+
+	// TRY_TO_TIMESTAMP(expr) → TRY_CAST(expr AS TIMESTAMP)
+	t.functionMap["TRY_TO_TIMESTAMP"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("__TRY_TO_TIMESTAMP__")
+			return fn
+		},
+	}
+
+	// CONVERT_TIMEZONE(from, to, ts) → timezone(to, ts)
+	t.functionMap["CONVERT_TIMEZONE"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("__CONVERT_TIMEZONE__")
+			return fn
+		},
+	}
 }
 
 // Translate converts Snowflake SQL to DuckDB-compatible SQL.
@@ -115,7 +167,7 @@ func (t *Translator) Translate(sql string) (string, error) {
 		strings.HasPrefix(upperSQL, "DESCRIBE ") ||
 		strings.HasPrefix(upperSQL, "DESC ") ||
 		strings.HasPrefix(upperSQL, "EXPLAIN ") {
-		return sql, nil
+		return t.translateDDLDefaults(sql), nil
 	}
 
 	// Parse the SQL statement into an AST
@@ -169,6 +221,9 @@ func (t *Translator) applyStringFallbackTranslations(sql string) string {
 		{regexp.MustCompile(`(?i)\bLISTAGG\s*\(`), "STRING_AGG("},
 		{regexp.MustCompile(`(?i)\bOBJECT_CONSTRUCT\s*\(`), "json_object("},
 		{regexp.MustCompile(`(?i)\bFLATTEN\s*\(`), "UNNEST("},
+		{regexp.MustCompile(`(?i)\bUUID_STRING\s*\(`), "uuid("},
+		{regexp.MustCompile(`(?i)\bARRAY_SIZE\s*\(`), "len("},
+		{regexp.MustCompile(`(?i)\bTO_VARCHAR\s*\(`), "strftime("},
 	}
 
 	for _, r := range replacements {
@@ -178,6 +233,26 @@ func (t *Translator) applyStringFallbackTranslations(sql string) string {
 	// Also apply the post-processing transformations
 	sql = strings.ReplaceAll(sql, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
 	sql = strings.ReplaceAll(sql, "current_timestamp()", "CURRENT_TIMESTAMP")
+	sql = strings.ReplaceAll(sql, "CURRENT_DATE()", "CURRENT_DATE")
+	sql = strings.ReplaceAll(sql, "current_date()", "CURRENT_DATE")
+
+	return sql
+}
+
+// translateDDLDefaults applies Snowflake→DuckDB translations in DDL statements,
+// specifically for DEFAULT clauses that use Snowflake functions.
+// The translator normally skips DDL (AST parser adds backticks), but DEFAULT values
+// containing Snowflake functions like UUID_STRING() need translation.
+func (t *Translator) translateDDLDefaults(sql string) string {
+	// UUID_STRING() → uuid()
+	re := regexp.MustCompile(`(?i)\bUUID_STRING\s*\(\s*\)`)
+	sql = re.ReplaceAllString(sql, "uuid()")
+
+	// CURRENT_TIMESTAMP() → CURRENT_TIMESTAMP (remove parens)
+	sql = strings.ReplaceAll(sql, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
+	sql = strings.ReplaceAll(sql, "current_timestamp()", "CURRENT_TIMESTAMP")
+
+	// CURRENT_DATE() → CURRENT_DATE
 	sql = strings.ReplaceAll(sql, "CURRENT_DATE()", "CURRENT_DATE")
 	sql = strings.ReplaceAll(sql, "current_date()", "CURRENT_DATE")
 
@@ -209,6 +284,34 @@ func (t *Translator) handleComplexTransformations(sql string) string {
 
 	// Handle DATEDIFF: __DATEDIFF__(part, start, end) → DATE_DIFF('part', start, end)
 	sql = t.transformDATEDIFF(sql)
+
+	// Handle SHA2: __SHA2__(expr, bits) → sha256(expr)
+	sql = t.transformMarkedFunction(sql, "__SHA2__", func(args string) string {
+		parts := splitFunctionArgs(args, 2)
+		if len(parts) >= 1 {
+			return fmt.Sprintf("sha256(%s)", strings.TrimSpace(parts[0]))
+		}
+		return fmt.Sprintf("sha256(%s)", args)
+	})
+
+	// Handle TRY_TO_DOUBLE: __TRY_TO_DOUBLE__(expr) → TRY_CAST(expr AS DOUBLE)
+	sql = t.transformMarkedFunction(sql, "__TRY_TO_DOUBLE__", func(args string) string {
+		return fmt.Sprintf("TRY_CAST(%s AS DOUBLE)", args)
+	})
+
+	// Handle TRY_TO_TIMESTAMP: __TRY_TO_TIMESTAMP__(expr) → TRY_CAST(expr AS TIMESTAMP)
+	sql = t.transformMarkedFunction(sql, "__TRY_TO_TIMESTAMP__", func(args string) string {
+		return fmt.Sprintf("TRY_CAST(%s AS TIMESTAMP)", args)
+	})
+
+	// Handle CONVERT_TIMEZONE: __CONVERT_TIMEZONE__(from, to, ts) → timezone(to, ts)
+	sql = t.transformMarkedFunction(sql, "__CONVERT_TIMEZONE__", func(args string) string {
+		parts := splitFunctionArgs(args, 3)
+		if len(parts) == 3 {
+			return fmt.Sprintf("timezone(%s, %s)", strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]))
+		}
+		return fmt.Sprintf("timezone(%s)", args)
+	})
 
 	return sql
 }
