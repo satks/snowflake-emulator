@@ -1,6 +1,8 @@
 // Package config provides configuration constants for the Snowflake emulator.
 package config
 
+import "os"
+
 // Default database and schema settings.
 const (
 	DefaultDatabase = "TEST_DB"
@@ -43,6 +45,13 @@ const (
 	ParamQueryTag               SessionParameter = "QUERY_TAG"
 	ParamGoQueryResultFormat    SessionParameter = "GO_QUERY_RESULT_FORMAT"
 )
+
+// IsCatalogMode returns true if catalog mode is enabled via ENABLE_CATALOG_MODE env var.
+// When enabled, databases are created as DuckDB catalogs (via ATTACH) enabling
+// three-part name resolution (database.schema.table).
+func IsCatalogMode() bool {
+	return os.Getenv("ENABLE_CATALOG_MODE") == "true"
+}
 
 // DefaultSessionParameters returns the default session parameters.
 func DefaultSessionParameters() map[SessionParameter]string {

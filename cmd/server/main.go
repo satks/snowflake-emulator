@@ -11,6 +11,7 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/nnnkkk7/snowflake-emulator/pkg/config"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/connection"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/metadata"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/query"
@@ -51,7 +52,12 @@ func main() {
 	sessionMgr := session.NewManager(24 * time.Hour)
 	stmtMgr := query.NewStatementManager(1 * time.Hour)
 
-	executor := query.NewExecutor(connMgr, repo)
+	catalogMode := config.IsCatalogMode()
+	if catalogMode {
+		log.Println("Catalog mode enabled (ENABLE_CATALOG_MODE=true)")
+	}
+
+	executor := query.NewExecutor(connMgr, repo, query.WithCatalogMode(catalogMode))
 
 	// Initialize stage manager for COPY INTO support
 	stageDir := os.Getenv("STAGE_DIR")
@@ -70,9 +76,9 @@ func main() {
 		query.WithMergeProcessor(mergeProcessor),
 	)
 
-	sessionHandler := handlers.NewSessionHandler(sessionMgr, repo)
+	sessionHandler := handlers.NewSessionHandlerWithCatalogMode(sessionMgr, repo, catalogMode)
 	queryHandler := handlers.NewQueryHandler(executor, sessionMgr)
-	restAPIHandler := handlers.NewRestAPIv2Handler(executor, stmtMgr, repo)
+	restAPIHandler := handlers.NewRestAPIv2HandlerWithCatalogMode(executor, stmtMgr, repo, catalogMode)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

@@ -885,6 +885,313 @@ func serializeColumnDefs(columns []ColumnDef) string {
 	return strings.Join(parts, ";")
 }
 
+// Catalog Mode Operations
+// These methods are used when ENABLE_CATALOG_MODE=true.
+// They use DuckDB ATTACH/DETACH for database management and three-part naming for tables.
+
+// CreateDatabaseCatalog creates a new database as a DuckDB catalog via ATTACH.
+// ATTACH cannot run inside a transaction, so metadata insert is done separately.
+func (r *Repository) CreateDatabaseCatalog(ctx context.Context, name, comment string, ifNotExists bool) (*Database, error) {
+	if name == "" {
+		return nil, fmt.Errorf("database name cannot be empty")
+	}
+
+	normalizedName := strings.ToUpper(name)
+
+	// Check if already exists
+	existing, _ := r.GetDatabaseByName(ctx, normalizedName)
+	if existing != nil {
+		if ifNotExists {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("database %s already exists", normalizedName)
+	}
+
+	// ATTACH ':memory:' AS "{name}" — creates a named in-memory catalog
+	attachSQL := fmt.Sprintf(`ATTACH ':memory:' AS "%s"`, normalizedName)
+	if _, err := r.mgr.Exec(ctx, attachSQL); err != nil {
+		if ifNotExists && strings.Contains(err.Error(), "already") {
+			existing, _ := r.GetDatabaseByName(ctx, normalizedName)
+			if existing != nil {
+				return existing, nil
+			}
+		}
+		return nil, fmt.Errorf("failed to attach catalog: %w", err)
+	}
+
+	// Create default PUBLIC schema in the new catalog
+	publicSchemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"."PUBLIC"`, normalizedName)
+	if _, err := r.mgr.Exec(ctx, publicSchemaSQL); err != nil {
+		// Cleanup: detach on failure
+		detachSQL := fmt.Sprintf(`DETACH "%s"`, normalizedName)
+		_, _ = r.mgr.Exec(ctx, detachSQL)
+		return nil, fmt.Errorf("failed to create PUBLIC schema in catalog: %w", err)
+	}
+
+	// Insert metadata
+	id := uuid.New().String()
+	query := `INSERT INTO _metadata_databases (id, name, account_id, comment, created_at, owner)
+	          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`
+	if _, err := r.mgr.Exec(ctx, query, id, normalizedName, "", comment, ""); err != nil {
+		// Cleanup: detach on metadata failure
+		detachSQL := fmt.Sprintf(`DETACH "%s"`, normalizedName)
+		_, _ = r.mgr.Exec(ctx, detachSQL)
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "Constraint Error") {
+			return nil, fmt.Errorf("database %s already exists", normalizedName)
+		}
+		return nil, fmt.Errorf("failed to insert database metadata: %w", err)
+	}
+
+	// Also insert metadata for the default PUBLIC schema
+	schemaID := uuid.New().String()
+	schemaQuery := `INSERT INTO _metadata_schemas (id, database_id, name, comment, created_at, owner)
+	                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`
+	if _, err := r.mgr.Exec(ctx, schemaQuery, schemaID, id, "PUBLIC", "Default schema", ""); err != nil {
+		// Non-fatal: PUBLIC schema metadata already exists or insert failed
+		if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "Constraint Error") {
+			return nil, fmt.Errorf("failed to insert PUBLIC schema metadata: %w", err)
+		}
+	}
+
+	return r.GetDatabase(ctx, id)
+}
+
+// DropDatabaseCatalog drops a database by detaching the DuckDB catalog.
+func (r *Repository) DropDatabaseCatalog(ctx context.Context, name string, ifExists bool) error {
+	normalizedName := strings.ToUpper(name)
+
+	db, err := r.GetDatabaseByName(ctx, normalizedName)
+	if err != nil {
+		if ifExists {
+			return nil
+		}
+		return fmt.Errorf("database %s not found", normalizedName)
+	}
+
+	// Cascade delete metadata: tables → schemas → database
+	schemas, _ := r.ListSchemas(ctx, db.ID)
+	for _, schema := range schemas {
+		deleteTablesQuery := `DELETE FROM _metadata_tables WHERE schema_id = ?`
+		_, _ = r.mgr.Exec(ctx, deleteTablesQuery, schema.ID)
+	}
+
+	deleteSchemasQuery := `DELETE FROM _metadata_schemas WHERE database_id = ?`
+	_, _ = r.mgr.Exec(ctx, deleteSchemasQuery, db.ID)
+
+	deleteDBQuery := `DELETE FROM _metadata_databases WHERE id = ?`
+	if _, err := r.mgr.Exec(ctx, deleteDBQuery, db.ID); err != nil {
+		return fmt.Errorf("failed to delete database metadata: %w", err)
+	}
+
+	// Detach the catalog
+	detachSQL := fmt.Sprintf(`DETACH "%s"`, normalizedName)
+	if _, err := r.mgr.Exec(ctx, detachSQL); err != nil {
+		if ifExists {
+			return nil
+		}
+		return fmt.Errorf("failed to detach catalog: %w", err)
+	}
+
+	return nil
+}
+
+// CreateSchemaCatalog creates a schema within a DuckDB catalog.
+func (r *Repository) CreateSchemaCatalog(ctx context.Context, databaseID, name, comment string, ifNotExists bool) (*Schema, error) {
+	if name == "" {
+		return nil, fmt.Errorf("schema name cannot be empty")
+	}
+
+	normalizedName := strings.ToUpper(name)
+
+	// Look up database name
+	db, err := r.GetDatabase(ctx, databaseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database: %w", err)
+	}
+
+	// Check if already exists
+	existing, _ := r.GetSchemaByName(ctx, databaseID, normalizedName)
+	if existing != nil {
+		if ifNotExists {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("schema %s already exists in database %s", normalizedName, db.Name)
+	}
+
+	// Create DuckDB schema within the catalog
+	createSchemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"."%s"`, db.Name, normalizedName)
+	if _, err := r.mgr.Exec(ctx, createSchemaSQL); err != nil {
+		return nil, fmt.Errorf("failed to create DuckDB schema: %w", err)
+	}
+
+	// Insert metadata
+	id := uuid.New().String()
+	query := `INSERT INTO _metadata_schemas (id, database_id, name, comment, created_at, owner)
+	          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`
+	if _, err := r.mgr.Exec(ctx, query, id, databaseID, normalizedName, comment, ""); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "Constraint Error") {
+			if ifNotExists {
+				existing, _ := r.GetSchemaByName(ctx, databaseID, normalizedName)
+				if existing != nil {
+					return existing, nil
+				}
+			}
+			return nil, fmt.Errorf("schema %s already exists in database", normalizedName)
+		}
+		return nil, fmt.Errorf("failed to insert schema metadata: %w", err)
+	}
+
+	return r.GetSchema(ctx, id)
+}
+
+// DropSchemaCatalog drops a schema from a DuckDB catalog.
+func (r *Repository) DropSchemaCatalog(ctx context.Context, id string, ifExists bool) error {
+	schema, err := r.GetSchema(ctx, id)
+	if err != nil {
+		if ifExists {
+			return nil
+		}
+		return err
+	}
+
+	db, err := r.GetDatabase(ctx, schema.DatabaseID)
+	if err != nil {
+		return fmt.Errorf("failed to get database: %w", err)
+	}
+
+	// Drop DuckDB schema
+	dropSchemaSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s"."%s" CASCADE`, db.Name, schema.Name)
+	if _, err := r.mgr.Exec(ctx, dropSchemaSQL); err != nil {
+		return fmt.Errorf("failed to drop DuckDB schema: %w", err)
+	}
+
+	// Cascade delete metadata: tables → schema
+	deleteTablesQuery := `DELETE FROM _metadata_tables WHERE schema_id = ?`
+	_, _ = r.mgr.Exec(ctx, deleteTablesQuery, id)
+
+	deleteSchemaQuery := `DELETE FROM _metadata_schemas WHERE id = ?`
+	if _, err := r.mgr.Exec(ctx, deleteSchemaQuery, id); err != nil {
+		return fmt.Errorf("failed to delete schema metadata: %w", err)
+	}
+
+	return nil
+}
+
+// CreateTableCatalog creates a table using three-part catalog naming.
+func (r *Repository) CreateTableCatalog(ctx context.Context, schemaID, name string, columns []ColumnDef, comment string) (*Table, error) {
+	if name == "" {
+		return nil, fmt.Errorf("table name cannot be empty")
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("table must have at least one column")
+	}
+
+	normalizedName := strings.ToUpper(name)
+	id := uuid.New().String()
+
+	// Build column definitions
+	var colDefs []string
+	var primaryKeys []string
+	for _, col := range columns {
+		colDef := fmt.Sprintf("%s %s", col.Name, col.Type)
+		if !col.Nullable {
+			colDef += " NOT NULL"
+		}
+		if col.Default != nil {
+			colDef += fmt.Sprintf(" DEFAULT %s", *col.Default)
+		}
+		if col.PrimaryKey {
+			primaryKeys = append(primaryKeys, col.Name)
+		}
+		colDefs = append(colDefs, colDef)
+	}
+
+	if len(primaryKeys) > 0 {
+		colDefs = append(colDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(primaryKeys, ", ")))
+	}
+
+	// Get schema and database for three-part name
+	schema, err := r.GetSchema(ctx, schemaID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schema: %w", err)
+	}
+
+	db, err := r.GetDatabase(ctx, schema.DatabaseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database: %w", err)
+	}
+
+	columnDefsJSON := serializeColumnDefs(columns)
+
+	// Three-part catalog naming: "DATABASE"."SCHEMA"."TABLE"
+	// Note: DuckDB does not allow writing to multiple attached databases in a single transaction.
+	// So we create the table first, then insert metadata separately.
+	fullyQualifiedName := fmt.Sprintf(`"%s"."%s"."%s"`, db.Name, schema.Name, normalizedName)
+
+	createTableSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", fullyQualifiedName, strings.Join(colDefs, ", "))
+	if _, err := r.mgr.Exec(ctx, createTableSQL); err != nil {
+		return nil, fmt.Errorf("failed to create DuckDB table: %w", err)
+	}
+
+	metaQuery := `INSERT INTO _metadata_tables (id, schema_id, name, table_type, comment, created_at, owner, clustering_key, column_definitions)
+	              VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`
+	if _, err := r.mgr.Exec(ctx, metaQuery, id, schemaID, normalizedName, "BASE TABLE", comment, "", "", columnDefsJSON); err != nil {
+		// Cleanup: drop the table we just created
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", fullyQualifiedName)
+		_, _ = r.mgr.Exec(ctx, dropSQL)
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "Constraint Error") {
+			return nil, fmt.Errorf("table %s already exists in schema", normalizedName)
+		}
+		return nil, fmt.Errorf("failed to insert table metadata: %w", err)
+	}
+
+	return r.GetTable(ctx, id)
+}
+
+// DropTableCatalog drops a table using three-part catalog naming.
+// Note: DuckDB does not allow writing to multiple attached databases in a single transaction.
+func (r *Repository) DropTableCatalog(ctx context.Context, id string) error {
+	table, err := r.GetTable(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	schema, err := r.GetSchema(ctx, table.SchemaID)
+	if err != nil {
+		return fmt.Errorf("failed to get schema: %w", err)
+	}
+
+	db, err := r.GetDatabase(ctx, schema.DatabaseID)
+	if err != nil {
+		return fmt.Errorf("failed to get database: %w", err)
+	}
+
+	// Drop the DuckDB table first
+	fullyQualifiedName := fmt.Sprintf(`"%s"."%s"."%s"`, db.Name, schema.Name, table.Name)
+	dropTableSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", fullyQualifiedName)
+	if _, err := r.mgr.Exec(ctx, dropTableSQL); err != nil {
+		return fmt.Errorf("failed to drop DuckDB table: %w", err)
+	}
+
+	// Delete metadata separately
+	query := `DELETE FROM _metadata_tables WHERE id = ?`
+	result, err := r.mgr.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete table metadata: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("table with ID %s not found", id)
+	}
+
+	return nil
+}
+
 // Stage CRUD Operations
 
 // CreateStage creates a new stage in the specified schema.

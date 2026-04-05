@@ -70,3 +70,24 @@ func BuildTableName(database, schema, table string) string {
 func ParseTableRef(ref string) (database, schema, table string) {
 	return defaultTableNamer.ParseTableReference(ref)
 }
+
+// BuildCatalogTableName constructs a DuckDB table name using three-part catalog naming.
+// This is used when catalog mode is enabled (ENABLE_CATALOG_MODE=true).
+//
+// Examples:
+//   - BuildCatalogTableName("TEST_DB", "PUBLIC", "USERS") -> "TEST_DB"."PUBLIC"."USERS"
+//   - BuildCatalogTableName("", "PUBLIC", "USERS") -> "PUBLIC"."USERS"
+//   - BuildCatalogTableName("", "", "USERS") -> "USERS"
+func BuildCatalogTableName(database, schema, table string) string {
+	database = strings.ToUpper(strings.TrimSpace(database))
+	schema = strings.ToUpper(strings.TrimSpace(schema))
+	table = strings.ToUpper(strings.TrimSpace(table))
+
+	if database != "" && schema != "" {
+		return `"` + database + `"."` + schema + `"."` + table + `"`
+	}
+	if schema != "" {
+		return `"` + schema + `"."` + table + `"`
+	}
+	return `"` + table + `"`
+}

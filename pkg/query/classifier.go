@@ -231,3 +231,79 @@ func IsRollback(sql string) bool {
 	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
 	return strings.HasPrefix(upperSQL, "ROLLBACK")
 }
+
+// IsCreateDatabase checks if the SQL is a CREATE DATABASE statement.
+func (c *Classifier) IsCreateDatabase(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "CREATE DATABASE")
+}
+
+// IsDropDatabase checks if the SQL is a DROP DATABASE statement.
+func (c *Classifier) IsDropDatabase(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "DROP DATABASE")
+}
+
+// IsCreateSchema checks if the SQL is a CREATE SCHEMA statement.
+func (c *Classifier) IsCreateSchema(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "CREATE SCHEMA")
+}
+
+// IsDropSchema checks if the SQL is a DROP SCHEMA statement.
+func (c *Classifier) IsDropSchema(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "DROP SCHEMA")
+}
+
+// IsUseDatabase checks if the SQL is a USE DATABASE statement.
+func (c *Classifier) IsUseDatabase(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "USE DATABASE")
+}
+
+// IsUseSchema checks if the SQL is a USE SCHEMA statement or a bare USE statement.
+func (c *Classifier) IsUseSchema(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	if strings.HasPrefix(upperSQL, "USE SCHEMA") {
+		return true
+	}
+	// Bare "USE name" (but not "USE DATABASE" or "USE WAREHOUSE")
+	if strings.HasPrefix(upperSQL, "USE ") &&
+		!strings.HasPrefix(upperSQL, "USE DATABASE") &&
+		!strings.HasPrefix(upperSQL, "USE WAREHOUSE") &&
+		!strings.HasPrefix(upperSQL, "USE ROLE") {
+		return true
+	}
+	return false
+}
+
+// IsCreateDatabase is a convenience function to check if SQL is a CREATE DATABASE statement.
+func IsCreateDatabase(sql string) bool {
+	return DefaultClassifier.IsCreateDatabase(sql)
+}
+
+// IsDropDatabase is a convenience function to check if SQL is a DROP DATABASE statement.
+func IsDropDatabase(sql string) bool {
+	return DefaultClassifier.IsDropDatabase(sql)
+}
+
+// IsCreateSchema is a convenience function to check if SQL is a CREATE SCHEMA statement.
+func IsCreateSchema(sql string) bool {
+	return DefaultClassifier.IsCreateSchema(sql)
+}
+
+// IsDropSchema is a convenience function to check if SQL is a DROP SCHEMA statement.
+func IsDropSchema(sql string) bool {
+	return DefaultClassifier.IsDropSchema(sql)
+}
+
+// IsUseDatabase is a convenience function to check if SQL is a USE DATABASE statement.
+func IsUseDatabase(sql string) bool {
+	return DefaultClassifier.IsUseDatabase(sql)
+}
+
+// IsUseSchema is a convenience function to check if SQL is a USE SCHEMA statement.
+func IsUseSchema(sql string) bool {
+	return DefaultClassifier.IsUseSchema(sql)
+}
