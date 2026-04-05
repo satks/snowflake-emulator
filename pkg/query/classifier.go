@@ -308,6 +308,39 @@ func IsUseSchema(sql string) bool {
 	return DefaultClassifier.IsUseSchema(sql)
 }
 
+// IsShowSchemas checks if the SQL is a SHOW SCHEMAS statement.
+func (c *Classifier) IsShowSchemas(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "SHOW SCHEMAS")
+}
+
+// IsShowTables checks if the SQL is a SHOW TABLES statement.
+func (c *Classifier) IsShowTables(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "SHOW TABLES")
+}
+
+// IsDescribeTable checks if the SQL is a DESCRIBE TABLE or DESC TABLE statement.
+func (c *Classifier) IsDescribeTable(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "DESCRIBE TABLE") || strings.HasPrefix(upperSQL, "DESC TABLE")
+}
+
+// IsShowSchemas is a convenience function.
+func IsShowSchemas(sql string) bool {
+	return DefaultClassifier.IsShowSchemas(sql)
+}
+
+// IsShowTables is a convenience function.
+func IsShowTables(sql string) bool {
+	return DefaultClassifier.IsShowTables(sql)
+}
+
+// IsDescribeTable is a convenience function.
+func IsDescribeTable(sql string) bool {
+	return DefaultClassifier.IsDescribeTable(sql)
+}
+
 // IsAlterTableClusterBy checks if the SQL is an ALTER TABLE ... CLUSTER BY statement.
 func (c *Classifier) IsAlterTableClusterBy(sql string) bool {
 	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
