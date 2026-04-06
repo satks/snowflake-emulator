@@ -1265,6 +1265,41 @@ func TestTranslator_DDLDefaults(t *testing.T) {
 			input:    "CREATE TABLE simple (id INTEGER, name VARCHAR)",
 			expected: "CREATE TABLE simple (id INTEGER, name VARCHAR)",
 		},
+		{
+			name:     "STRING_to_VARCHAR",
+			input:    "CREATE TABLE t (name STRING, code STRING NOT NULL)",
+			expected: "CREATE TABLE t (name VARCHAR, code VARCHAR NOT NULL)",
+		},
+		{
+			name:     "TIMESTAMP_NTZ_to_TIMESTAMP",
+			input:    "CREATE TABLE t (created_at TIMESTAMP_NTZ, updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP)",
+			expected: "CREATE TABLE t (created_at TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+		},
+		{
+			name:     "TIMESTAMP_LTZ_to_TIMESTAMPTZ",
+			input:    "CREATE TABLE t (ts TIMESTAMP_LTZ)",
+			expected: "CREATE TABLE t (ts TIMESTAMPTZ)",
+		},
+		{
+			name:     "TIMESTAMP_TZ_to_TIMESTAMPTZ",
+			input:    "CREATE TABLE t (ts TIMESTAMP_TZ)",
+			expected: "CREATE TABLE t (ts TIMESTAMPTZ)",
+		},
+		{
+			name:     "NUMBER_to_DOUBLE",
+			input:    "CREATE TABLE t (amount NUMBER, qty NUMBER NOT NULL)",
+			expected: "CREATE TABLE t (amount DOUBLE, qty DOUBLE NOT NULL)",
+		},
+		{
+			name:     "VARIANT_to_JSON",
+			input:    "CREATE TABLE t (payload VARIANT, metadata VARIANT DEFAULT '{}')",
+			expected: "CREATE TABLE t (payload JSON, metadata JSON DEFAULT '{}')",
+		},
+		{
+			name:     "Mixed_Snowflake_Types",
+			input:    "CREATE TABLE events (id NUMBER, name STRING, payload VARIANT, created_at TIMESTAMP_NTZ, expires_at TIMESTAMP_TZ)",
+			expected: "CREATE TABLE events (id DOUBLE, name VARCHAR, payload JSON, created_at TIMESTAMP, expires_at TIMESTAMPTZ)",
+		},
 	}
 
 	for _, tt := range tests {

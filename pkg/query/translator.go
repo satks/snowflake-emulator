@@ -288,6 +288,23 @@ func (t *Translator) translateDDLDefaults(sql string) string {
 	variantRe := regexp.MustCompile(`(?i)::VARIANT\b`)
 	sql = variantRe.ReplaceAllString(sql, "::JSON")
 
+	// Snowflake column type aliases → DuckDB types
+	// Use word boundaries to avoid partial matches (e.g., "TIMESTAMP_NTZ" must not match "TIMESTAMP")
+	typeReplacements := []struct {
+		pattern     *regexp.Regexp
+		replacement string
+	}{
+		{regexp.MustCompile(`(?i)\bTIMESTAMP_NTZ\b`), "TIMESTAMP"},
+		{regexp.MustCompile(`(?i)\bTIMESTAMP_LTZ\b`), "TIMESTAMPTZ"},
+		{regexp.MustCompile(`(?i)\bTIMESTAMP_TZ\b`), "TIMESTAMPTZ"},
+		{regexp.MustCompile(`(?i)\bSTRING\b`), "VARCHAR"},
+		{regexp.MustCompile(`(?i)\bNUMBER\b`), "DOUBLE"},
+		{regexp.MustCompile(`(?i)\bVARIANT\b`), "JSON"},
+	}
+	for _, tr := range typeReplacements {
+		sql = tr.pattern.ReplaceAllString(sql, tr.replacement)
+	}
+
 	return sql
 }
 
