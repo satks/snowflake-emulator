@@ -712,6 +712,34 @@ func TestExecutor_ShowSchemas(t *testing.T) {
 	}
 }
 
+// TestExecutor_ShowSchemasColumnTypes verifies that SHOW SCHEMAS populates ColumnTypes for SDK compatibility.
+func TestExecutor_ShowSchemasColumnTypes(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "CT_DB", "")
+	_, _ = repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+
+	result, err := executor.Query(ctx, `SHOW SCHEMAS IN DATABASE CT_DB`)
+	if err != nil {
+		t.Fatalf("SHOW SCHEMAS error = %v", err)
+	}
+	if len(result.ColumnTypes) != len(result.Columns) {
+		t.Fatalf("Expected %d ColumnTypes, got %d", len(result.Columns), len(result.ColumnTypes))
+	}
+	// Verify "name" column is present in ColumnTypes
+	found := false
+	for _, ct := range result.ColumnTypes {
+		if ct.Name == "name" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected 'name' column in ColumnTypes")
+	}
+}
+
 // TestExecutor_ShowTables tests SHOW TABLES from metadata.
 func TestExecutor_ShowTables(t *testing.T) {
 	executor, repo := setupTestExecutor(t)
@@ -729,6 +757,90 @@ func TestExecutor_ShowTables(t *testing.T) {
 	}
 	if len(result.Rows) != 2 {
 		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	}
+}
+
+// TestExecutor_ShowTablesColumnTypes verifies that SHOW TABLES populates ColumnTypes for SDK compatibility.
+func TestExecutor_ShowTablesColumnTypes(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "TCT_DB", "")
+	schema, _ := repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+	cols := []metadata.ColumnDef{{Name: "ID", Type: "INTEGER"}}
+	_, _ = repo.CreateTable(ctx, schema.ID, "T1", cols, "")
+
+	result, err := executor.Query(ctx, `SHOW TABLES IN TCT_DB.PUBLIC`)
+	if err != nil {
+		t.Fatalf("SHOW TABLES error = %v", err)
+	}
+	if len(result.ColumnTypes) != len(result.Columns) {
+		t.Fatalf("Expected %d ColumnTypes, got %d", len(result.Columns), len(result.ColumnTypes))
+	}
+	// Verify "name" column is present
+	found := false
+	for _, ct := range result.ColumnTypes {
+		if ct.Name == "name" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected 'name' column in ColumnTypes")
+	}
+}
+
+// TestExecutor_DescribeTableColumnTypes verifies that DESCRIBE TABLE populates ColumnTypes.
+func TestExecutor_DescribeTableColumnTypes(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "DCT_DB", "")
+	schema, _ := repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+	cols := []metadata.ColumnDef{
+		{Name: "ID", Type: "INTEGER", PrimaryKey: true},
+		{Name: "NAME", Type: "VARCHAR"},
+	}
+	_, _ = repo.CreateTable(ctx, schema.ID, "ITEMS", cols, "")
+
+	result, err := executor.Query(ctx, `DESCRIBE TABLE DCT_DB.PUBLIC.ITEMS`)
+	if err != nil {
+		t.Fatalf("DESCRIBE TABLE error = %v", err)
+	}
+	if len(result.ColumnTypes) == 0 {
+		t.Fatal("Expected ColumnTypes to be populated")
+	}
+	if result.ColumnTypes[0].Name != "name" {
+		t.Errorf("Expected first ColumnType name 'name', got %q", result.ColumnTypes[0].Name)
+	}
+}
+
+// TestExecutor_InformationSchemaTables tests that INFORMATION_SCHEMA.TABLES queries work.
+func TestExecutor_InformationSchemaTables(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "IS_DB", "")
+	schema, _ := repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+	cols := []metadata.ColumnDef{{Name: "ID", Type: "INTEGER"}}
+	_, _ = repo.CreateTable(ctx, schema.ID, "USERS", cols, "")
+	_, _ = repo.CreateTable(ctx, schema.ID, "ORDERS", cols, "")
+
+	result, err := executor.Query(ctx, `SELECT * FROM INFORMATION_SCHEMA.TABLES`)
+	if err != nil {
+		t.Fatalf("INFORMATION_SCHEMA.TABLES error = %v", err)
+	}
+	if len(result.Columns) < 3 {
+		t.Fatalf("Expected at least 3 columns, got %d", len(result.Columns))
+	}
+	if diff := cmp.Diff([]string{"TABLE_CATALOG", "TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE"}, result.Columns); diff != "" {
+		t.Errorf("Columns mismatch:\n%s", diff)
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	}
+	if len(result.ColumnTypes) != 4 {
+		t.Errorf("Expected 4 ColumnTypes, got %d", len(result.ColumnTypes))
 	}
 }
 

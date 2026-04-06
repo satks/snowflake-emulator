@@ -12,6 +12,7 @@ import (
 
 	"github.com/nnnkkk7/snowflake-emulator/pkg/connection"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/metadata"
+	"github.com/nnnkkk7/snowflake-emulator/server/types"
 )
 
 // Binding validation regexes to prevent SQL injection
@@ -109,6 +110,12 @@ func (e *Executor) Query(ctx context.Context, sql string) (*Result, error) {
 	// Intercept SYSTEM$STREAM_HAS_DATA() function
 	if strings.Contains(strings.ToUpper(sql), "SYSTEM$STREAM_HAS_DATA") {
 		return e.queryStreamHasData(ctx, sql)
+	}
+
+	// Intercept INFORMATION_SCHEMA queries — DuckDB doesn't expose this for attached catalogs
+	upperSQL := strings.ToUpper(sql)
+	if strings.Contains(upperSQL, "INFORMATION_SCHEMA.TABLES") {
+		return e.queryInformationSchemaTables(ctx, sql)
 	}
 
 	// Translate Snowflake SQL to DuckDB SQL
@@ -669,6 +676,20 @@ func convertValue(val interface{}) interface{} {
 
 // SHOW/DESCRIBE query methods — build Result from metadata repository
 
+// buildColumnTypes creates ColumnMetadata for hand-constructed result sets (SHOW/DESCRIBE)
+// where we don't have sql.Rows to infer types from.
+func buildColumnTypes(columns []string) []types.ColumnMetadata {
+	result := make([]types.ColumnMetadata, len(columns))
+	for i, col := range columns {
+		result[i] = types.ColumnMetadata{
+			Name:     col,
+			Type:     "TEXT",
+			Nullable: true,
+		}
+	}
+	return result
+}
+
 // queryShowSchemas handles SHOW SCHEMAS [IN DATABASE name].
 func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, error) {
 	stmt, err := ParseShowSchemas(sql)
@@ -717,7 +738,7 @@ func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, e
 		}
 	}
 
-	return &Result{Columns: columns, Rows: rows}, nil
+	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
 }
 
 // queryShowTables handles SHOW TABLES [IN [db.]schema].
@@ -807,7 +828,7 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 		}
 	}
 
-	return &Result{Columns: columns, Rows: rows}, nil
+	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
 }
 
 // queryDescribeTable handles DESCRIBE TABLE [db.][schema.]table.
@@ -948,7 +969,46 @@ func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *Describe
 		}
 	}
 
-	return &Result{Columns: columns, Rows: rows}, nil
+	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
+}
+
+// queryInformationSchemaTables handles SELECT ... FROM INFORMATION_SCHEMA.TABLES queries.
+// DuckDB doesn't expose INFORMATION_SCHEMA for attached catalogs, so we answer from metadata.
+func (e *Executor) queryInformationSchemaTables(ctx context.Context, _ string) (*Result, error) {
+	columns := []string{"TABLE_CATALOG", "TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE"}
+	var rows [][]interface{}
+
+	databases, err := e.repo.ListDatabases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list databases: %w", err)
+	}
+
+	for _, db := range databases {
+		schemas, err := e.repo.ListSchemas(ctx, db.ID)
+		if err != nil {
+			continue
+		}
+		for _, s := range schemas {
+			tables, err := e.repo.ListTables(ctx, s.ID)
+			if err != nil {
+				continue
+			}
+			for _, t := range tables {
+				tableType := "BASE TABLE"
+				if t.TableType != "" {
+					tableType = t.TableType
+				}
+				rows = append(rows, []interface{}{
+					db.Name,
+					s.Name,
+					t.Name,
+					tableType,
+				})
+			}
+		}
+	}
+
+	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
 }
 
 // Stream execution methods
