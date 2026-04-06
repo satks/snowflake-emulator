@@ -318,6 +318,54 @@ func TestQueryHandler_ExecuteDML(t *testing.T) {
 	}
 }
 
+// TestQueryHandler_DDLResponseIncludesRowType tests that DDL responses include "rowtype": [].
+func TestQueryHandler_DDLResponseIncludesRowType(t *testing.T) {
+	handler, sessionMgr, _ := setupTestQueryHandler(t)
+	ctx := context.Background()
+
+	sess, err := sessionMgr.CreateSession(ctx, "testuser", "TEST_DB", "PUBLIC")
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	req := types.QueryRequest{
+		SQLText: "CREATE TABLE TEST_DB.PUBLIC_DDL_TEST (id INTEGER)",
+	}
+
+	body, _ := json.Marshal(req)
+	httpReq := httptest.NewRequest(http.MethodPost, "/queries/v1/query-request", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Snowflake Token=\""+sess.Token+"\"")
+
+	rr := httptest.NewRecorder()
+	handler.ExecuteQuery(rr, httpReq)
+
+	// Verify at raw JSON level that "rowtype" key is present
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	data, ok := raw["data"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected data field in response")
+	}
+
+	rowtype, exists := data["rowtype"]
+	if !exists {
+		t.Fatal("Expected 'rowtype' field in DDL response, but it was missing")
+	}
+
+	// Should be an empty array, not null
+	arr, ok := rowtype.([]interface{})
+	if !ok {
+		t.Fatalf("Expected rowtype to be an array, got %T", rowtype)
+	}
+	if len(arr) != 0 {
+		t.Errorf("Expected empty rowtype array for DDL, got %d elements", len(arr))
+	}
+}
+
 // TestQueryHandler_ConcurrentQueries tests concurrent query execution.
 func TestQueryHandler_ConcurrentQueries(t *testing.T) {
 	handler, sessionMgr, _ := setupTestQueryHandler(t)
