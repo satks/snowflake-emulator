@@ -318,8 +318,9 @@ func TestQueryHandler_ExecuteDML(t *testing.T) {
 	}
 }
 
-// TestQueryHandler_DDLResponseIncludesRowType tests that DDL responses include "rowtype": [].
-func TestQueryHandler_DDLResponseIncludesRowType(t *testing.T) {
+// TestQueryHandler_DDLResponseIncludesRequiredFields tests that DDL responses include
+// all fields expected by Snowflake SDKs (rowtype, rowset, sqlState).
+func TestQueryHandler_DDLResponseIncludesRequiredFields(t *testing.T) {
 	handler, sessionMgr, _ := setupTestQueryHandler(t)
 	ctx := context.Background()
 
@@ -340,7 +341,7 @@ func TestQueryHandler_DDLResponseIncludesRowType(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ExecuteQuery(rr, httpReq)
 
-	// Verify at raw JSON level that "rowtype" key is present
+	// Verify at raw JSON level that required fields are present
 	var raw map[string]interface{}
 	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("Failed to unmarshal response: %v", err)
@@ -351,18 +352,80 @@ func TestQueryHandler_DDLResponseIncludesRowType(t *testing.T) {
 		t.Fatal("Expected data field in response")
 	}
 
+	// Check rowtype is present as empty array
 	rowtype, exists := data["rowtype"]
 	if !exists {
 		t.Fatal("Expected 'rowtype' field in DDL response, but it was missing")
 	}
-
-	// Should be an empty array, not null
-	arr, ok := rowtype.([]interface{})
+	rowtypeArr, ok := rowtype.([]interface{})
 	if !ok {
 		t.Fatalf("Expected rowtype to be an array, got %T", rowtype)
 	}
-	if len(arr) != 0 {
-		t.Errorf("Expected empty rowtype array for DDL, got %d elements", len(arr))
+	if len(rowtypeArr) != 0 {
+		t.Errorf("Expected empty rowtype array for DDL, got %d elements", len(rowtypeArr))
+	}
+
+	// Check rowset is present as empty array
+	rowset, exists := data["rowset"]
+	if !exists {
+		t.Fatal("Expected 'rowset' field in DDL response, but it was missing")
+	}
+	rowsetArr, ok := rowset.([]interface{})
+	if !ok {
+		t.Fatalf("Expected rowset to be an array, got %T", rowset)
+	}
+	if len(rowsetArr) != 0 {
+		t.Errorf("Expected empty rowset array for DDL, got %d elements", len(rowsetArr))
+	}
+
+	// Check sqlState is present
+	sqlState, exists := data["sqlState"]
+	if !exists {
+		t.Fatal("Expected 'sqlState' field in DDL response, but it was missing")
+	}
+	if sqlState != "00000" {
+		t.Errorf("Expected sqlState '00000', got %v", sqlState)
+	}
+}
+
+// TestQueryHandler_DMLResponseIncludesRequiredFields tests that DML responses include
+// all fields expected by Snowflake SDKs.
+func TestQueryHandler_DMLResponseIncludesRequiredFields(t *testing.T) {
+	handler, sessionMgr, _ := setupTestQueryHandler(t)
+	ctx := context.Background()
+
+	sess, err := sessionMgr.CreateSession(ctx, "testuser", "TEST_DB", "PUBLIC")
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	req := types.QueryRequest{
+		SQLText: "INSERT INTO TEST_DB.PUBLIC_TEST_TABLE VALUES (10, 'Test', 999)",
+	}
+
+	body, _ := json.Marshal(req)
+	httpReq := httptest.NewRequest(http.MethodPost, "/queries/v1/query-request", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Snowflake Token=\""+sess.Token+"\"")
+
+	rr := httptest.NewRecorder()
+	handler.ExecuteQuery(rr, httpReq)
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	data, ok := raw["data"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected data field in response")
+	}
+
+	// All these fields must be present in every DML response
+	for _, field := range []string{"rowtype", "rowset", "sqlState", "queryId", "statementTypeId", "queryResultFormat"} {
+		if _, exists := data[field]; !exists {
+			t.Errorf("Expected '%s' field in DML response, but it was missing", field)
+		}
 	}
 }
 

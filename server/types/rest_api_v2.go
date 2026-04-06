@@ -25,7 +25,7 @@ type BindingValue struct {
 // StatementResponse represents the response from statement operations.
 type StatementResponse struct {
 	ResultSetMetaData  *ResultSetMetaData `json:"resultSetMetaData,omitempty"`
-	Data               [][]interface{}    `json:"data,omitempty"`
+	Data               [][]interface{}    `json:"data"`
 	Code               string             `json:"code"`
 	StatementStatusURL string             `json:"statementStatusUrl,omitempty"`
 	RequestID          string             `json:"requestId,omitempty"`

@@ -135,6 +135,7 @@ func (h *QueryHandler) executeDML(w http.ResponseWriter, ctx context.Context, se
 			SQLState:          apierror.SQLStateSuccess,
 			StatementTypeID:   int64(stmtTypeID),
 			RowType:           []types.ColumnMetadata{},
+			RowSet:            [][]string{},
 			Total:             result.RowsAffected,
 			Returned:          0,
 			QueryResultFormat: config.QueryResultFormatJSON,

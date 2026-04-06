@@ -308,6 +308,94 @@ func TestRestAPIv2Handler_CancelStatement_NotFound(t *testing.T) {
 	}
 }
 
+// TestRestAPIv2Handler_DDLResponseIncludesDataField tests that DDL responses via REST API v2
+// always include the "data" field as an array.
+func TestRestAPIv2Handler_DDLResponseIncludesDataField(t *testing.T) {
+	_, router := setupRestAPIv2Handler(t)
+
+	reqBody := types.SubmitStatementRequest{
+		Statement: "CREATE TABLE rest_ddl_test (id INTEGER)",
+		Database:  "TEST_DB",
+		Schema:    "PUBLIC",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/statements", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	// Verify at raw JSON level
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// "data" must always be present as an array
+	data, exists := raw["data"]
+	if !exists {
+		t.Fatal("Expected 'data' field in DDL response, but it was missing")
+	}
+	if _, ok := data.([]interface{}); !ok {
+		t.Fatalf("Expected data to be an array, got %T", data)
+	}
+
+	// "resultSetMetaData" should be present for success responses
+	meta, exists := raw["resultSetMetaData"]
+	if !exists {
+		t.Fatal("Expected 'resultSetMetaData' field in DDL response, but it was missing")
+	}
+	metaMap, ok := meta.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected resultSetMetaData to be an object, got %T", meta)
+	}
+
+	// rowType must be present within metadata
+	if _, exists := metaMap["rowType"]; !exists {
+		t.Fatal("Expected 'rowType' field in resultSetMetaData, but it was missing")
+	}
+}
+
+// TestRestAPIv2Handler_ErrorResponseIncludesDataField tests that error responses
+// always include the "data" field as an array.
+func TestRestAPIv2Handler_ErrorResponseIncludesDataField(t *testing.T) {
+	_, router := setupRestAPIv2Handler(t)
+
+	reqBody := types.SubmitStatementRequest{
+		Statement: "SELECT * FROM nonexistent_table_xyz",
+		Database:  "TEST_DB",
+		Schema:    "PUBLIC",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/statements", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// "data" must be present even in error responses
+	data, exists := raw["data"]
+	if !exists {
+		t.Fatal("Expected 'data' field in error response, but it was missing")
+	}
+	dataArr, ok := data.([]interface{})
+	if !ok {
+		t.Fatalf("Expected data to be an array, got %T", data)
+	}
+	if len(dataArr) != 0 {
+		t.Errorf("Expected empty data array in error response, got %d elements", len(dataArr))
+	}
+}
+
 func TestRestAPIv2Handler_InvalidJSON(t *testing.T) {
 	_, router := setupRestAPIv2Handler(t)
 

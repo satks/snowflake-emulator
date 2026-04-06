@@ -110,6 +110,7 @@ func (h *RestAPIv2Handler) SubmitStatement(w http.ResponseWriter, r *http.Reques
 			StatementStatusURL: "/api/v2/statements/" + stmt.Handle,
 			Message:            err.Error(),
 			CreatedOn:          stmt.CreatedOn.UnixMilli(),
+			Data:               [][]interface{}{},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -153,6 +154,7 @@ func (h *RestAPIv2Handler) GetStatement(w http.ResponseWriter, r *http.Request) 
 			SQLState:           types.SQLState00000,
 			StatementStatusURL: "/api/v2/statements/" + stmt.Handle,
 			CreatedOn:          stmt.CreatedOn.UnixMilli(),
+			Data:               [][]interface{}{},
 		}
 	case query.StatementStatusSuccess:
 		resp = h.buildStatementResponse(stmt, stmt.Result)
@@ -164,6 +166,7 @@ func (h *RestAPIv2Handler) GetStatement(w http.ResponseWriter, r *http.Request) 
 			StatementStatusURL: "/api/v2/statements/" + stmt.Handle,
 			Message:            stmt.Error.Message,
 			CreatedOn:          stmt.CreatedOn.UnixMilli(),
+			Data:               [][]interface{}{},
 		}
 	case query.StatementStatusCanceled:
 		resp = types.StatementResponse{
@@ -173,6 +176,7 @@ func (h *RestAPIv2Handler) GetStatement(w http.ResponseWriter, r *http.Request) 
 			StatementStatusURL: "/api/v2/statements/" + stmt.Handle,
 			Message:            "Statement canceled",
 			CreatedOn:          stmt.CreatedOn.UnixMilli(),
+			Data:               [][]interface{}{},
 		}
 	}
 
@@ -271,6 +275,7 @@ func (h *RestAPIv2Handler) sendError(w http.ResponseWriter, statusCode int, mess
 		Code:     apierror.CodeInvalidParameter,
 		SQLState: sqlState,
 		Message:  message,
+		Data:     [][]interface{}{},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
