@@ -341,6 +341,28 @@ func IsDescribeTable(sql string) bool {
 	return DefaultClassifier.IsDescribeTable(sql)
 }
 
+// IsCreateStream checks if the SQL is a CREATE STREAM statement.
+func (c *Classifier) IsCreateStream(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "CREATE STREAM")
+}
+
+// IsDropStream checks if the SQL is a DROP STREAM statement.
+func (c *Classifier) IsDropStream(sql string) bool {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upperSQL, "DROP STREAM")
+}
+
+// IsCreateStream is a convenience function.
+func IsCreateStream(sql string) bool {
+	return DefaultClassifier.IsCreateStream(sql)
+}
+
+// IsDropStream is a convenience function.
+func IsDropStream(sql string) bool {
+	return DefaultClassifier.IsDropStream(sql)
+}
+
 // IsAlterTableClusterBy checks if the SQL is an ALTER TABLE ... CLUSTER BY statement.
 func (c *Classifier) IsAlterTableClusterBy(sql string) bool {
 	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
