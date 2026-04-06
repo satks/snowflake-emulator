@@ -109,10 +109,10 @@ type QueryResponse struct {
 // QuerySuccessData contains successful query response data.
 type QuerySuccessData struct {
 	QueryID           string           `json:"queryId"`
-	SQLState          string           `json:"sqlState,omitempty"`
+	SQLState          string           `json:"sqlState"`
 	StatementTypeID   int64            `json:"statementTypeId"`
 	RowType           []ColumnMetadata `json:"rowtype"`
-	RowSet            [][]string       `json:"rowset,omitempty"`
+	RowSet            [][]string       `json:"rowset"`
 	Total             int64            `json:"total"`
 	Returned          int64            `json:"returned"`
 	QueryResultFormat string           `json:"queryResultFormat"`
