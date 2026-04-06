@@ -6,19 +6,15 @@ The Go gopher was designed by the awesome [Renee French](https://reneefrench.blo
 
 # Snowflake Emulator
 
-A lightweight, open-source Snowflake emulator built with Go and DuckDB, designed for local development and testing.
+A lightweight, open-source Snowflake emulator built with Go and DuckDB, designed for local development and testing. This fork ([satks/snowflake-emulator](https://github.com/satks/snowflake-emulator)) adds **catalog mode**, **Streams/CDC**, **expanded SQL function support**, and **full Snowflake SDK compatibility** on top of the [original project](https://github.com/nnnkkk7/snowflake-emulator).
 
-[![CI](https://github.com/nnnkkk7/snowflake-emulator/workflows/CI/badge.svg)](https://github.com/nnnkkk7/snowflake-emulator/actions)
+[![CI](https://github.com/satks/snowflake-emulator/workflows/CI/badge.svg)](https://github.com/satks/snowflake-emulator/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Reference](https://pkg.go.dev/badge/github.com/nnnkkk7/snowflake-emulator.svg)](https://pkg.go.dev/github.com/nnnkkk7/snowflake-emulator)
-[![GitHub Stars](https://img.shields.io/github/stars/nnnkkk7/snowflake-emulator?style=social)](https://github.com/nnnkkk7/snowflake-emulator)
-
-⭐ Like it? Give us a star!
 
 ## TL;DR
 
 ```bash
-docker run -p 8080:8080 ghcr.io/nnnkkk7/snowflake-emulator:latest
+docker run -p 8080:8080 ghcr.io/satks/snowflake-emulator:latest
 ```
 
 ```go
@@ -29,9 +25,10 @@ rows, _ := db.Query("SELECT IFF(1>0,'yes','no')")  // Snowflake SQL works!
 
 ## Use Cases
 
-- Run integration tests locally without Snowflake credentials (Go via gosnowflake, or any language via REST API)
+- Run integration tests locally without Snowflake credentials (Go via gosnowflake, Node.js via snowflake-sdk, or any language via REST API)
 - Cheap & fast CI smoke tests for Snowflake SQL
-- Validate Snowflake-ish SQL behavior before hitting real Snowflake
+- Validate Snowflake SQL behavior before hitting real Snowflake
+- Test Streams/CDC pipelines locally
 
 > **Note**: This is a dev/test emulator — no auth, no clustering, no external stages, no JS stored procedures. See [Limitations](#limitations) for details.
 
@@ -40,8 +37,10 @@ rows, _ := db.Query("SELECT IFF(1>0,'yes','no')")  // Snowflake SQL works!
 Snowflake Emulator provides a [Snowflake](https://www.snowflake.com/)-compatible SQL interface backed by DuckDB for local development and testing:
 
 - **Local & CI workflows** - Run Snowflake-compatible SQL with no external dependencies
-- **Snowflake-compatible access** - [`gosnowflake`](https://github.com/snowflakedb/gosnowflake) driver support and REST API v2
-- **SQL execution** - Snowflake → DuckDB translation
+- **Snowflake-compatible access** - [`gosnowflake`](https://github.com/snowflakedb/gosnowflake) driver, [Node.js snowflake-sdk](https://www.npmjs.com/package/snowflake-sdk), and REST API v2
+- **SQL execution** - Snowflake → DuckDB translation (22+ function translations)
+- **Catalog mode** - Three-part name resolution (`db.schema.table`) with DuckDB ATTACH catalogs
+- **Streams/CDC** - Change Data Capture emulation with `CREATE STREAM` / `SYSTEM$STREAM_HAS_DATA`
 
 ## Installation
 
@@ -66,18 +65,23 @@ Docker is the recommended installation method for all platforms.
 
 ```bash
 # Pull the image
-docker pull ghcr.io/nnnkkk7/snowflake-emulator:latest
+docker pull ghcr.io/satks/snowflake-emulator:latest
 
 # Run with in-memory database
-docker run -p 8080:8080 ghcr.io/nnnkkk7/snowflake-emulator:latest
+docker run -p 8080:8080 ghcr.io/satks/snowflake-emulator:latest
 
 # Run with persistent storage
 docker run -p 8080:8080 -v snowflake-data:/data \
   -e DB_PATH=/data/snowflake.db \
-  ghcr.io/nnnkkk7/snowflake-emulator:latest
+  ghcr.io/satks/snowflake-emulator:latest
+
+# Run with catalog mode enabled (three-part names, CREATE DATABASE via SQL)
+docker run -p 8080:8080 \
+  -e ENABLE_CATALOG_MODE=true \
+  ghcr.io/satks/snowflake-emulator:latest
 ```
 
-### Build from Source (Linux x86_64)
+### Build from Source
 
 Prerequisites:
 
@@ -85,7 +89,7 @@ Prerequisites:
 - GCC (for DuckDB CGO)
 
 ```bash
-git clone https://github.com/nnnkkk7/snowflake-emulator.git
+git clone https://github.com/satks/snowflake-emulator.git
 cd snowflake-emulator
 CGO_ENABLED=1 go build -o snowflake-emulator ./cmd/server
 ```
@@ -101,6 +105,9 @@ DB_PATH=/path/to/database.db ./snowflake-emulator
 
 # Custom port
 PORT=9090 ./snowflake-emulator
+
+# Catalog mode (enables three-part names and CREATE DATABASE via SQL)
+ENABLE_CATALOG_MODE=true ./snowflake-emulator
 ```
 
 ### Using with gosnowflake Driver
@@ -197,6 +204,45 @@ go run ./example/gosnowflake
 | `STAGE_DIR` | `./stages` | Directory for internal stage files |
 | `ENABLE_CATALOG_MODE` | `false` | When `true`, databases use DuckDB ATTACH catalogs enabling three-part name resolution (`db.schema.table`) and CREATE/DROP DATABASE via SQL |
 
+## Catalog Mode
+
+When `ENABLE_CATALOG_MODE=true`, the emulator uses DuckDB's ATTACH mechanism to create real database catalogs, enabling:
+
+- **Three-part name resolution**: `SELECT * FROM my_db.my_schema.my_table`
+- **CREATE/DROP DATABASE via SQL**: `CREATE DATABASE my_db` creates an attached catalog
+- **Cross-database queries**: Reference tables across databases in a single query
+- **SHOW/DESCRIBE compatibility**: `SHOW TABLES`, `SHOW SCHEMAS`, `DESCRIBE TABLE` return Snowflake-compatible column sets
+
+```bash
+# Start with catalog mode
+ENABLE_CATALOG_MODE=true ./snowflake-emulator
+```
+
+```sql
+-- Create database and schema (works in catalog mode)
+CREATE DATABASE my_db;
+CREATE SCHEMA my_db.analytics;
+
+-- Create table with three-part name
+CREATE TABLE my_db.analytics.events (
+    id NUMBER,
+    event_name STRING,
+    payload VARIANT,
+    created_at TIMESTAMP_NTZ
+);
+
+-- Snowflake type aliases are translated automatically
+-- STRING → VARCHAR, TIMESTAMP_NTZ → TIMESTAMP, VARIANT → JSON, NUMBER → DOUBLE
+
+-- Query with three-part names
+SELECT * FROM my_db.analytics.events;
+
+-- Inspect metadata
+SHOW SCHEMAS IN DATABASE my_db;
+SHOW TABLES IN my_db.analytics;
+DESCRIBE TABLE my_db.analytics.events;
+```
+
 ## API Endpoints
 
 ### gosnowflake Protocol
@@ -241,11 +287,12 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 | Category | Operations | Description |
 |----------|------------|-------------|
 | **Query** | `SELECT`, `EXPLAIN` | Read operations with full result set support |
-| **Query** | `SHOW SCHEMAS`, `SHOW TABLES` | List metadata objects (supports `IN DATABASE`/`IN schema` qualifiers) |
-| **Query** | `DESCRIBE TABLE` / `DESC TABLE` | Inspect table columns and types |
+| **Query** | `SHOW SCHEMAS`, `SHOW TABLES` | Snowflake-compatible response format (10/11 columns) |
+| **Query** | `DESCRIBE TABLE` / `DESC TABLE` | Snowflake-compatible response format (12 columns) |
+| **Query** | `INFORMATION_SCHEMA.TABLES` | Answered from metadata + DuckDB discovery |
 | **DML** | `INSERT`, `UPDATE`, `DELETE` | Data manipulation with rows affected count |
-| **DDL** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE` | Schema management |
-| **DDL** | `CREATE DATABASE`, `DROP DATABASE` | Database management |
+| **DDL** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE` | Schema management with Snowflake type translation |
+| **DDL** | `CREATE DATABASE`, `DROP DATABASE` | Database management (catalog mode: via SQL; legacy: via REST API) |
 | **DDL** | `CREATE SCHEMA`, `DROP SCHEMA` | Schema namespace management |
 | **DDL** | `ALTER TABLE ... CLUSTER BY` | Accepted as no-op (DuckDB has no clustering) |
 | **Streams** | `CREATE STREAM`, `DROP STREAM` | Change Data Capture on tables (see [Streams/CDC](#streamscdc)) |
@@ -260,7 +307,7 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 </details>
 
 <details>
-<summary><b>Supported SQL Functions</b></summary>
+<summary><b>Supported SQL Functions (22 translations)</b></summary>
 
 | Snowflake | DuckDB | Description |
 |-----------|--------|-------------|
@@ -285,6 +332,22 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 | `CONVERT_TIMEZONE(from, to, ts)` | `timezone(to, ts)` | Timezone conversion |
 | `GET_PATH(obj, path)` | `json_extract_string(obj, path)` | JSON path extraction |
 | `::VARIANT` cast | `::JSON` cast | Variant type cast |
+
+</details>
+
+<details>
+<summary><b>DDL Type Translations</b></summary>
+
+Snowflake type aliases in `CREATE TABLE` are automatically translated to DuckDB types:
+
+| Snowflake Type | DuckDB Type |
+|----------------|-------------|
+| `STRING` | `VARCHAR` |
+| `TIMESTAMP_NTZ` | `TIMESTAMP` |
+| `TIMESTAMP_LTZ` | `TIMESTAMPTZ` |
+| `TIMESTAMP_TZ` | `TIMESTAMPTZ` |
+| `NUMBER` | `DOUBLE` |
+| `VARIANT` | `JSON` |
 
 </details>
 
@@ -329,6 +392,21 @@ DROP STREAM my_stream;
 
 Options: `APPEND_ONLY = TRUE/FALSE`, `SHOW_INITIAL_ROWS = TRUE/FALSE`.
 
+## SDK Compatibility
+
+This fork has been tested and verified with:
+
+- **Go** — [gosnowflake](https://github.com/snowflakedb/gosnowflake) driver
+- **Node.js** — [snowflake-sdk](https://www.npmjs.com/package/snowflake-sdk)
+- **REST API** — Any HTTP client via REST API v2
+
+All response formats match real Snowflake's wire protocol:
+- `SHOW SCHEMAS` returns 10 columns matching Snowflake's output
+- `SHOW TABLES` returns 11 columns matching Snowflake's output
+- `DESCRIBE TABLE` returns 12 columns matching Snowflake's output
+- DDL/DML responses always include `rowtype`, `rowset`, and `sqlState` fields
+- Identifier folding: unquoted identifiers are uppercased (Snowflake convention)
+
 ## Limitations
 
 This emulator is designed for development and testing. The following features are not supported:
@@ -345,7 +423,8 @@ This emulator is designed for development and testing. The following features ar
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+This project is forked from [nnnkkk7/snowflake-emulator](https://github.com/nnnkkk7/snowflake-emulator).
+
 ## License
 
 [MIT](LICENSE)
-
