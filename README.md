@@ -195,6 +195,7 @@ go run ./example/gosnowflake
 | `PORT` | `8080` | HTTP server port |
 | `DB_PATH` | `:memory:` | DuckDB database path (empty for in-memory) |
 | `STAGE_DIR` | `./stages` | Directory for internal stage files |
+| `ENABLE_CATALOG_MODE` | `false` | When `true`, databases use DuckDB ATTACH catalogs enabling three-part name resolution (`db.schema.table`) and CREATE/DROP DATABASE via SQL |
 
 ## API Endpoints
 
@@ -239,12 +240,18 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 
 | Category | Operations | Description |
 |----------|------------|-------------|
-| **Query** | `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Read operations with full result set support |
+| **Query** | `SELECT`, `EXPLAIN` | Read operations with full result set support |
+| **Query** | `SHOW SCHEMAS`, `SHOW TABLES` | List metadata objects (supports `IN DATABASE`/`IN schema` qualifiers) |
+| **Query** | `DESCRIBE TABLE` / `DESC TABLE` | Inspect table columns and types |
 | **DML** | `INSERT`, `UPDATE`, `DELETE` | Data manipulation with rows affected count |
 | **DDL** | `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE` | Schema management |
 | **DDL** | `CREATE DATABASE`, `DROP DATABASE` | Database management |
 | **DDL** | `CREATE SCHEMA`, `DROP SCHEMA` | Schema namespace management |
+| **DDL** | `ALTER TABLE ... CLUSTER BY` | Accepted as no-op (DuckDB has no clustering) |
+| **Streams** | `CREATE STREAM`, `DROP STREAM` | Change Data Capture on tables (see [Streams/CDC](#streamscdc)) |
+| **Streams** | `SYSTEM$STREAM_HAS_DATA()` | Check if a stream has unconsumed changes |
 | **Transaction** | `BEGIN`, `COMMIT`, `ROLLBACK` | Transaction control |
+| **Session** | `USE DATABASE`, `USE SCHEMA` | Set active database/schema context |
 | **Data Loading** | `COPY INTO` | Bulk data loading from internal stages (CSV, JSON) |
 | **Upsert** | `MERGE INTO` | Conditional insert/update/delete operations |
 
@@ -268,6 +275,16 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 | `OBJECT_CONSTRUCT(...)` | `json_object(...)` | Build JSON object |
 | `LISTAGG(col, sep)` | `STRING_AGG(col, sep)` | String aggregation |
 | `FLATTEN(...)` | `UNNEST(...)` | Array expansion |
+| `UUID_STRING()` | `uuid()` | Generate UUID |
+| `ARRAY_SIZE(arr)` | `len(arr)` | Array length |
+| `TO_VARCHAR(ts, fmt)` | `strftime(ts, fmt)` | Format value to string |
+| `SHA2(expr, bits)` | `sha256(expr)` | Hash function |
+| `ARRAY_CONTAINS(val, arr)` | `list_contains(arr, val)` | Check array membership |
+| `TRY_TO_DOUBLE(expr)` | `TRY_CAST(expr AS DOUBLE)` | Safe cast to double |
+| `TRY_TO_TIMESTAMP(expr)` | `TRY_CAST(expr AS TIMESTAMP)` | Safe cast to timestamp |
+| `CONVERT_TIMEZONE(from, to, ts)` | `timezone(to, ts)` | Timezone conversion |
+| `GET_PATH(obj, path)` | `json_extract_string(obj, path)` | JSON path extraction |
+| `::VARIANT` cast | `::JSON` cast | Variant type cast |
 
 </details>
 
@@ -292,6 +309,26 @@ The emulator supports standard SQL operations with automatic Snowflake-to-DuckDB
 
 </details>
 
+## Streams/CDC
+
+The emulator supports Snowflake Streams for Change Data Capture (CDC). Streams track DML changes (`INSERT`, `UPDATE`, `DELETE`) on source tables using shadow changelog tables.
+
+```sql
+-- Create a stream on a table
+CREATE STREAM my_stream ON TABLE my_table;
+
+-- Query the stream for changes (includes METADATA$ACTION, METADATA$ISUPDATE, METADATA$ROW_ID)
+SELECT * FROM my_stream;
+
+-- Check if stream has unconsumed data
+SELECT SYSTEM$STREAM_HAS_DATA('my_stream');
+
+-- Drop stream
+DROP STREAM my_stream;
+```
+
+Options: `APPEND_ONLY = TRUE/FALSE`, `SHOW_INITIAL_ROWS = TRUE/FALSE`.
+
 ## Limitations
 
 This emulator is designed for development and testing. The following features are not supported:
@@ -299,7 +336,7 @@ This emulator is designed for development and testing. The following features ar
 - Authentication/Authorization (skipped in dev mode)
 - Distributed processing / Clustering
 - Time Travel / Zero-Copy Cloning
-- Streams, Tasks, Pipes
+- Tasks, Pipes
 - External stages (S3, Azure, GCS)
 - Stored procedures with JavaScript
 - User-defined functions

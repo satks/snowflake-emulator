@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # Dockerfile
 # Multi-architecture build supporting AMD64 and ARM64
@@ -11,17 +10,14 @@ FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
 
-RUN --mount=type=bind,source=go.mod,target=go.mod,ro \
-    --mount=type=bind,source=go.sum,target=go.sum,ro \
-    --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
 
 # Build the application with CGO for DuckDB
 # Native build on each platform (emulated via QEMU for cross-platform)
-RUN --mount=type=bind,source=.,target=/src,ro \
-    --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 go build \
+RUN CGO_ENABLED=1 go build \
       -trimpath \
       -buildvcs=false \
       -ldflags="-s -w" \
