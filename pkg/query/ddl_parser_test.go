@@ -300,3 +300,163 @@ func TestParseUseSchema(t *testing.T) {
 		})
 	}
 }
+
+func TestParseShowSchemas(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		want    *ShowSchemasStmt
+		wantErr bool
+	}{
+		{
+			name: "bare",
+			sql:  "SHOW SCHEMAS",
+			want: &ShowSchemasStmt{},
+		},
+		{
+			name: "in_database",
+			sql:  `SHOW SCHEMAS IN DATABASE "TEST"`,
+			want: &ShowSchemasStmt{Database: "TEST"},
+		},
+		{
+			name: "in_database_unquoted",
+			sql:  "SHOW SCHEMAS IN DATABASE test",
+			want: &ShowSchemasStmt{Database: "TEST"},
+		},
+		{
+			name: "in_without_database_keyword",
+			sql:  "SHOW SCHEMAS IN test",
+			want: &ShowSchemasStmt{Database: "TEST"},
+		},
+		{
+			name: "with_semicolon",
+			sql:  "SHOW SCHEMAS IN DATABASE test;",
+			want: &ShowSchemasStmt{Database: "TEST"},
+		},
+		{
+			name:    "invalid",
+			sql:     "SHOW TABLES",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseShowSchemas(tt.sql)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseShowSchemas() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if diff := cmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("ParseShowSchemas() mismatch:\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+func TestParseShowTables(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		want    *ShowTablesStmt
+		wantErr bool
+	}{
+		{
+			name: "bare",
+			sql:  "SHOW TABLES",
+			want: &ShowTablesStmt{},
+		},
+		{
+			name: "in_schema",
+			sql:  "SHOW TABLES IN PUBLIC",
+			want: &ShowTablesStmt{Schema: "PUBLIC"},
+		},
+		{
+			name: "in_db_schema",
+			sql:  `SHOW TABLES IN "TEST"."PUBLIC"`,
+			want: &ShowTablesStmt{Database: "TEST", Schema: "PUBLIC"},
+		},
+		{
+			name: "in_db_schema_unquoted",
+			sql:  "SHOW TABLES IN test.public",
+			want: &ShowTablesStmt{Database: "TEST", Schema: "PUBLIC"},
+		},
+		{
+			name:    "invalid",
+			sql:     "SHOW SCHEMAS",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseShowTables(tt.sql)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseShowTables() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if diff := cmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("ParseShowTables() mismatch:\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+func TestParseDescribeTable(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		want    *DescribeTableStmt
+		wantErr bool
+	}{
+		{
+			name: "bare_table",
+			sql:  "DESCRIBE TABLE users",
+			want: &DescribeTableStmt{Table: "USERS"},
+		},
+		{
+			name: "schema_table",
+			sql:  `DESCRIBE TABLE "PUBLIC"."USERS"`,
+			want: &DescribeTableStmt{Schema: "PUBLIC", Table: "USERS"},
+		},
+		{
+			name: "db_schema_table",
+			sql:  `DESCRIBE TABLE "TEST"."PUBLIC"."USERS"`,
+			want: &DescribeTableStmt{Database: "TEST", Schema: "PUBLIC", Table: "USERS"},
+		},
+		{
+			name: "desc_shorthand",
+			sql:  "DESC TABLE users",
+			want: &DescribeTableStmt{Table: "USERS"},
+		},
+		{
+			name: "unquoted_three_part",
+			sql:  "DESCRIBE TABLE test.public.users",
+			want: &DescribeTableStmt{Database: "TEST", Schema: "PUBLIC", Table: "USERS"},
+		},
+		{
+			name:    "invalid",
+			sql:     "DESCRIBE users",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseDescribeTable(tt.sql)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDescribeTable() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if diff := cmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("ParseDescribeTable() mismatch:\n%s", diff)
+				}
+			}
+		})
+	}
+}

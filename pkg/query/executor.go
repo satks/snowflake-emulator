@@ -86,6 +86,18 @@ func (e *Executor) Configure(opts ...ExecutorOption) {
 
 // Query executes a SELECT query and returns results.
 func (e *Executor) Query(ctx context.Context, sql string) (*Result, error) {
+	// Intercept SHOW/DESCRIBE commands — answer from metadata, not DuckDB
+	classifier := NewClassifier()
+	if classifier.IsShowSchemas(sql) {
+		return e.queryShowSchemas(ctx, sql)
+	}
+	if classifier.IsShowTables(sql) {
+		return e.queryShowTables(ctx, sql)
+	}
+	if classifier.IsDescribeTable(sql) {
+		return e.queryDescribeTable(ctx, sql)
+	}
+
 	// Translate Snowflake SQL to DuckDB SQL
 	translatedSQL, err := e.translator.Translate(sql)
 	if err != nil {
@@ -556,6 +568,290 @@ func convertValue(val interface{}) interface{} {
 		// For other types, return as-is
 		return v
 	}
+}
+
+// SHOW/DESCRIBE query methods — build Result from metadata repository
+
+// queryShowSchemas handles SHOW SCHEMAS [IN DATABASE name].
+func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, error) {
+	stmt, err := ParseShowSchemas(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SHOW SCHEMAS: %w", err)
+	}
+
+	columns := []string{"created_on", "name", "database_name"}
+	var rows [][]interface{}
+
+	if stmt.Database != "" {
+		// Show schemas in specific database
+		db, err := e.repo.GetDatabaseByName(ctx, stmt.Database)
+		if err != nil {
+			return nil, fmt.Errorf("database %s not found: %w", stmt.Database, err)
+		}
+		schemas, err := e.repo.ListSchemas(ctx, db.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list schemas: %w", err)
+		}
+		for _, s := range schemas {
+			rows = append(rows, []interface{}{
+				s.CreatedAt.Format(time.RFC3339),
+				s.Name,
+				db.Name,
+			})
+		}
+	} else {
+		// Show schemas across all databases
+		databases, err := e.repo.ListDatabases(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list databases: %w", err)
+		}
+		for _, db := range databases {
+			schemas, err := e.repo.ListSchemas(ctx, db.ID)
+			if err != nil {
+				continue
+			}
+			for _, s := range schemas {
+				rows = append(rows, []interface{}{
+					s.CreatedAt.Format(time.RFC3339),
+					s.Name,
+					db.Name,
+				})
+			}
+		}
+	}
+
+	return &Result{Columns: columns, Rows: rows}, nil
+}
+
+// queryShowTables handles SHOW TABLES [IN [db.]schema].
+func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, error) {
+	stmt, err := ParseShowTables(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SHOW TABLES: %w", err)
+	}
+
+	columns := []string{"created_on", "name", "database_name", "schema_name", "kind"}
+	var rows [][]interface{}
+
+	if stmt.Database != "" && stmt.Schema != "" {
+		// Fully qualified: db.schema
+		db, err := e.repo.GetDatabaseByName(ctx, stmt.Database)
+		if err != nil {
+			return nil, fmt.Errorf("database %s not found: %w", stmt.Database, err)
+		}
+		schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+		if err != nil {
+			return nil, fmt.Errorf("schema %s not found: %w", stmt.Schema, err)
+		}
+		tables, err := e.repo.ListTables(ctx, schema.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tables: %w", err)
+		}
+		for _, t := range tables {
+			rows = append(rows, []interface{}{
+				t.CreatedAt.Format(time.RFC3339),
+				t.Name,
+				db.Name,
+				schema.Name,
+				t.TableType,
+			})
+		}
+	} else if stmt.Schema != "" {
+		// Schema only: find first matching schema across databases
+		databases, err := e.repo.ListDatabases(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list databases: %w", err)
+		}
+		for _, db := range databases {
+			schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+			if err != nil {
+				continue
+			}
+			tables, err := e.repo.ListTables(ctx, schema.ID)
+			if err != nil {
+				continue
+			}
+			for _, t := range tables {
+				rows = append(rows, []interface{}{
+					t.CreatedAt.Format(time.RFC3339),
+					t.Name,
+					db.Name,
+					schema.Name,
+					t.TableType,
+				})
+			}
+		}
+	} else {
+		// Bare SHOW TABLES: list all tables across all databases/schemas
+		databases, err := e.repo.ListDatabases(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list databases: %w", err)
+		}
+		for _, db := range databases {
+			schemas, err := e.repo.ListSchemas(ctx, db.ID)
+			if err != nil {
+				continue
+			}
+			for _, s := range schemas {
+				tables, err := e.repo.ListTables(ctx, s.ID)
+				if err != nil {
+					continue
+				}
+				for _, t := range tables {
+					rows = append(rows, []interface{}{
+						t.CreatedAt.Format(time.RFC3339),
+						t.Name,
+						db.Name,
+						s.Name,
+						t.TableType,
+					})
+				}
+			}
+		}
+	}
+
+	return &Result{Columns: columns, Rows: rows}, nil
+}
+
+// queryDescribeTable handles DESCRIBE TABLE [db.][schema.]table.
+// If metadata lookup fails (e.g., table created via raw SQL without metadata registration),
+// falls back to DuckDB's native DESCRIBE.
+func (e *Executor) queryDescribeTable(ctx context.Context, sql string) (*Result, error) {
+	stmt, err := ParseDescribeTable(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DESCRIBE TABLE: %w", err)
+	}
+
+	// Try metadata-based describe first
+	result, metaErr := e.describeTableFromMetadata(ctx, stmt)
+	if metaErr == nil && len(result.Rows) > 0 {
+		return result, nil
+	}
+
+	// Fallback: use DuckDB native DESCRIBE
+	tableName := stmt.Table
+	if stmt.Schema != "" {
+		tableName = stmt.Schema + "." + tableName
+	}
+	if stmt.Database != "" {
+		tableName = stmt.Database + "." + tableName
+	}
+
+	fallbackSQL := "DESCRIBE " + tableName
+	rows, err := e.mgr.Query(ctx, fallbackSQL)
+	if err != nil {
+		// If fallback also fails, return the original metadata error for better context
+		if metaErr != nil {
+			return nil, fmt.Errorf("DESCRIBE TABLE failed: %w", metaErr)
+		}
+		return nil, fmt.Errorf("DESCRIBE TABLE failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns, _ := rows.Columns()
+	columnTypes := InferColumnMetadata(columns, rows)
+
+	var resultRows [][]interface{}
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return nil, fmt.Errorf("failed to scan DESCRIBE row: %w", err)
+		}
+		row := make([]interface{}, len(columns))
+		for i, val := range values {
+			row[i] = convertValue(val)
+		}
+		resultRows = append(resultRows, row)
+	}
+
+	return &Result{Columns: columns, ColumnTypes: columnTypes, Rows: resultRows}, nil
+}
+
+// describeTableFromMetadata attempts to describe a table using the metadata repository.
+func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *DescribeTableStmt) (*Result, error) {
+	var db *metadata.Database
+	var err error
+
+	if stmt.Database != "" {
+		db, err = e.repo.GetDatabaseByName(ctx, stmt.Database)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		databases, err := e.repo.ListDatabases(ctx)
+		if err != nil || len(databases) == 0 {
+			return nil, fmt.Errorf("no databases found")
+		}
+		db = databases[0]
+	}
+
+	var schema *metadata.Schema
+	if stmt.Schema != "" {
+		schema, err = e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		schemas, err := e.repo.ListSchemas(ctx, db.ID)
+		if err != nil || len(schemas) == 0 {
+			return nil, fmt.Errorf("no schemas found in database %s", db.Name)
+		}
+		schema = schemas[0]
+	}
+
+	table, err := e.repo.GetTableByName(ctx, schema.ID, stmt.Table)
+	if err != nil {
+		return nil, err
+	}
+
+	columns := []string{"name", "type", "kind", "null?", "default", "primary key"}
+	var rows [][]interface{}
+
+	if table.ColumnDefinitions != "" {
+		colParts := strings.Split(table.ColumnDefinitions, ";")
+		for _, part := range colParts {
+			if part == "" {
+				continue
+			}
+			fields := strings.SplitN(part, ":", 5)
+			if len(fields) < 4 {
+				continue
+			}
+
+			name := fields[0]
+			colType := fields[1]
+			nullable := fields[2]
+			pk := fields[3]
+			defaultVal := ""
+			if len(fields) == 5 {
+				defaultVal = fields[4]
+			}
+
+			nullDisplay := "Y"
+			if nullable == "false" {
+				nullDisplay = "N"
+			}
+			pkDisplay := "N"
+			if pk == "true" {
+				pkDisplay = "Y"
+			}
+
+			rows = append(rows, []interface{}{
+				name,
+				colType,
+				"COLUMN",
+				nullDisplay,
+				defaultVal,
+				pkDisplay,
+			})
+		}
+	}
+
+	return &Result{Columns: columns, Rows: rows}, nil
 }
 
 // Catalog mode execution methods

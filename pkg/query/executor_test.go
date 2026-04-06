@@ -690,3 +690,76 @@ func TestTransactionClassifier(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutor_ShowSchemas tests SHOW SCHEMAS from metadata.
+func TestExecutor_ShowSchemas(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "SHOW_DB", "")
+	_, _ = repo.CreateSchema(ctx, db.ID, "ALPHA", "")
+	_, _ = repo.CreateSchema(ctx, db.ID, "BETA", "")
+
+	result, err := executor.Query(ctx, `SHOW SCHEMAS IN DATABASE SHOW_DB`)
+	if err != nil {
+		t.Fatalf("SHOW SCHEMAS error = %v", err)
+	}
+	if len(result.Columns) < 2 {
+		t.Fatalf("Expected at least 2 columns, got %d", len(result.Columns))
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("Expected 2 schemas, got %d", len(result.Rows))
+	}
+}
+
+// TestExecutor_ShowTables tests SHOW TABLES from metadata.
+func TestExecutor_ShowTables(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "SHOW_DB", "")
+	schema, _ := repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+	cols := []metadata.ColumnDef{{Name: "ID", Type: "INTEGER"}}
+	_, _ = repo.CreateTable(ctx, schema.ID, "TABLE_A", cols, "")
+	_, _ = repo.CreateTable(ctx, schema.ID, "TABLE_B", cols, "")
+
+	result, err := executor.Query(ctx, `SHOW TABLES IN SHOW_DB.PUBLIC`)
+	if err != nil {
+		t.Fatalf("SHOW TABLES error = %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	}
+}
+
+// TestExecutor_DescribeTable tests DESCRIBE TABLE from metadata.
+func TestExecutor_DescribeTable(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabase(ctx, "DESC_DB", "")
+	schema, _ := repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+	cols := []metadata.ColumnDef{
+		{Name: "ID", Type: "INTEGER", PrimaryKey: true},
+		{Name: "NAME", Type: "VARCHAR", Nullable: true},
+		{Name: "AGE", Type: "INTEGER"},
+	}
+	_, _ = repo.CreateTable(ctx, schema.ID, "USERS", cols, "")
+
+	result, err := executor.Query(ctx, `DESCRIBE TABLE DESC_DB.PUBLIC.USERS`)
+	if err != nil {
+		t.Fatalf("DESCRIBE TABLE error = %v", err)
+	}
+	if len(result.Rows) != 3 {
+		t.Errorf("Expected 3 columns described, got %d", len(result.Rows))
+	}
+	// Verify first column (ID)
+	if len(result.Rows) > 0 {
+		if result.Rows[0][0] != "ID" {
+			t.Errorf("Expected column name 'ID', got %v", result.Rows[0][0])
+		}
+		if result.Rows[0][5] != "Y" { // primary key
+			t.Errorf("Expected primary key 'Y', got %v", result.Rows[0][5])
+		}
+	}
+}

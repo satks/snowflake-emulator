@@ -155,3 +155,90 @@ func ParseUseSchema(sql string) (*UseSchemaStmt, error) {
 		Name: normalizeIdentifier(matches[1]),
 	}, nil
 }
+
+// ShowSchemasStmt represents a parsed SHOW SCHEMAS statement.
+type ShowSchemasStmt struct {
+	Database string // empty if not specified
+}
+
+// ShowTablesStmt represents a parsed SHOW TABLES statement.
+type ShowTablesStmt struct {
+	Database string // empty if not specified
+	Schema   string // empty if not specified
+}
+
+// DescribeTableStmt represents a parsed DESCRIBE TABLE statement.
+type DescribeTableStmt struct {
+	Database string // empty if not specified
+	Schema   string // empty if not specified
+	Table    string
+}
+
+// Regex patterns for SHOW/DESCRIBE parsing.
+var (
+	showSchemasRe   = regexp.MustCompile(`(?i)^\s*SHOW\s+SCHEMAS(?:\s+IN\s+(?:DATABASE\s+)?("?[A-Za-z_][A-Za-z0-9_]*"?))?\s*;?\s*$`)
+	showTablesRe    = regexp.MustCompile(`(?i)^\s*SHOW\s+TABLES(?:\s+IN\s+(?:("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?))?\s*;?\s*$`)
+	describeTableRe = regexp.MustCompile(`(?i)^\s*(?:DESCRIBE|DESC)\s+TABLE\s+(?:("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?(?:("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?)\s*;?\s*$`)
+)
+
+// ParseShowSchemas parses a SHOW SCHEMAS statement.
+// Supports: SHOW SCHEMAS, SHOW SCHEMAS IN DATABASE name, SHOW SCHEMAS IN name
+func ParseShowSchemas(sql string) (*ShowSchemasStmt, error) {
+	matches := showSchemasRe.FindStringSubmatch(sql)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid SHOW SCHEMAS statement: %s", sql)
+	}
+
+	stmt := &ShowSchemasStmt{}
+	if matches[1] != "" {
+		stmt.Database = normalizeIdentifier(matches[1])
+	}
+
+	return stmt, nil
+}
+
+// ParseShowTables parses a SHOW TABLES statement.
+// Supports: SHOW TABLES, SHOW TABLES IN schema, SHOW TABLES IN db.schema
+func ParseShowTables(sql string) (*ShowTablesStmt, error) {
+	matches := showTablesRe.FindStringSubmatch(sql)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid SHOW TABLES statement: %s", sql)
+	}
+
+	stmt := &ShowTablesStmt{}
+	if matches[1] != "" {
+		stmt.Database = normalizeIdentifier(matches[1])
+	}
+	if matches[2] != "" {
+		stmt.Schema = normalizeIdentifier(matches[2])
+	}
+
+	return stmt, nil
+}
+
+// ParseDescribeTable parses a DESCRIBE TABLE or DESC TABLE statement.
+// Supports: DESCRIBE TABLE table, DESCRIBE TABLE schema.table, DESCRIBE TABLE db.schema.table
+func ParseDescribeTable(sql string) (*DescribeTableStmt, error) {
+	matches := describeTableRe.FindStringSubmatch(sql)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid DESCRIBE TABLE statement: %s", sql)
+	}
+
+	stmt := &DescribeTableStmt{}
+
+	// Three capture groups: optional prefix1, optional prefix2, required table
+	// With 3 parts (db.schema.table): matches[1]=db, matches[2]=schema, matches[3]=table
+	// With 2 parts (schema.table): matches[1]=schema, matches[2]="", matches[3]=table
+	// With 1 part (table): matches[1]="", matches[2]="", matches[3]=table
+	if matches[1] != "" && matches[2] != "" {
+		// Three-part: db.schema.table
+		stmt.Database = normalizeIdentifier(matches[1])
+		stmt.Schema = normalizeIdentifier(matches[2])
+	} else if matches[1] != "" {
+		// Two-part: schema.table
+		stmt.Schema = normalizeIdentifier(matches[1])
+	}
+	stmt.Table = normalizeIdentifier(matches[3])
+
+	return stmt, nil
+}

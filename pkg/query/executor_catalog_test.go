@@ -425,3 +425,104 @@ func TestCatalogExecutor_ErrorHandling(t *testing.T) {
 		})
 	}
 }
+
+// TestCatalogExecutor_ShowSchemas tests SHOW SCHEMAS in catalog mode.
+func TestCatalogExecutor_ShowSchemas(t *testing.T) {
+	executor, repo := setupCatalogTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabaseCatalog(ctx, "SHOW_DB", "", true)
+	_, _ = repo.CreateSchemaCatalog(ctx, db.ID, "ALPHA", "", false)
+	_, _ = repo.CreateSchemaCatalog(ctx, db.ID, "BETA", "", false)
+
+	result, err := executor.Query(ctx, `SHOW SCHEMAS IN DATABASE SHOW_DB`)
+	if err != nil {
+		t.Fatalf("SHOW SCHEMAS error = %v", err)
+	}
+
+	// Should include PUBLIC (auto-created) + ALPHA + BETA = 3
+	if len(result.Rows) != 3 {
+		t.Errorf("Expected 3 schemas (PUBLIC+ALPHA+BETA), got %d", len(result.Rows))
+	}
+
+	// Verify column names
+	if result.Columns[0] != "created_on" || result.Columns[1] != "name" || result.Columns[2] != "database_name" {
+		t.Errorf("Unexpected columns: %v", result.Columns)
+	}
+}
+
+// TestCatalogExecutor_ShowTables tests SHOW TABLES in catalog mode.
+func TestCatalogExecutor_ShowTables(t *testing.T) {
+	executor, repo := setupCatalogTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabaseCatalog(ctx, "SHOW_DB", "", true)
+	schema, _ := repo.CreateSchemaCatalog(ctx, db.ID, "MY_SCHEMA", "", false)
+	cols := []metadata.ColumnDef{{Name: "ID", Type: "INTEGER"}}
+	_, _ = repo.CreateTableCatalog(ctx, schema.ID, "TABLE_A", cols, "")
+	_, _ = repo.CreateTableCatalog(ctx, schema.ID, "TABLE_B", cols, "")
+
+	result, err := executor.Query(ctx, `SHOW TABLES IN SHOW_DB.MY_SCHEMA`)
+	if err != nil {
+		t.Fatalf("SHOW TABLES error = %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	}
+	if result.Columns[1] != "name" {
+		t.Errorf("Expected 'name' column, got %s", result.Columns[1])
+	}
+}
+
+// TestCatalogExecutor_DescribeTable tests DESCRIBE TABLE in catalog mode.
+func TestCatalogExecutor_DescribeTable(t *testing.T) {
+	executor, repo := setupCatalogTestExecutor(t)
+	ctx := context.Background()
+
+	db, _ := repo.CreateDatabaseCatalog(ctx, "DESC_DB", "", true)
+	schema, _ := repo.CreateSchemaCatalog(ctx, db.ID, "MY_SCHEMA", "", false)
+	cols := []metadata.ColumnDef{
+		{Name: "ID", Type: "INTEGER", PrimaryKey: true},
+		{Name: "NAME", Type: "VARCHAR", Nullable: true},
+		{Name: "SCORE", Type: "DOUBLE"},
+	}
+	_, _ = repo.CreateTableCatalog(ctx, schema.ID, "STUDENTS", cols, "")
+
+	result, err := executor.Query(ctx, `DESCRIBE TABLE DESC_DB.MY_SCHEMA.STUDENTS`)
+	if err != nil {
+		t.Fatalf("DESCRIBE TABLE error = %v", err)
+	}
+	if len(result.Rows) != 3 {
+		t.Errorf("Expected 3 columns described, got %d", len(result.Rows))
+	}
+
+	// Check column details
+	if len(result.Rows) >= 3 {
+		// ID: primary key, not nullable
+		if result.Rows[0][0] != "ID" || result.Rows[0][5] != "Y" {
+			t.Errorf("Expected ID with PK=Y, got name=%v pk=%v", result.Rows[0][0], result.Rows[0][5])
+		}
+		// NAME: nullable
+		if result.Rows[1][0] != "NAME" || result.Rows[1][3] != "Y" {
+			t.Errorf("Expected NAME with null=Y, got name=%v null=%v", result.Rows[1][0], result.Rows[1][3])
+		}
+	}
+}
+
+// TestCatalogExecutor_ShowSchemasBareBare tests bare SHOW SCHEMAS (no database filter).
+func TestCatalogExecutor_ShowSchemasBare(t *testing.T) {
+	executor, _ := setupCatalogTestExecutor(t)
+	ctx := context.Background()
+
+	_, _ = executor.Execute(ctx, "CREATE DATABASE IF NOT EXISTS DB1")
+	_, _ = executor.Execute(ctx, "CREATE DATABASE IF NOT EXISTS DB2")
+
+	result, err := executor.Query(ctx, "SHOW SCHEMAS")
+	if err != nil {
+		t.Fatalf("SHOW SCHEMAS error = %v", err)
+	}
+	// DB1 has PUBLIC, DB2 has PUBLIC = at least 2 schemas
+	if len(result.Rows) < 2 {
+		t.Errorf("Expected at least 2 schemas, got %d", len(result.Rows))
+	}
+}
