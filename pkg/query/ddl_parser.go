@@ -51,6 +51,8 @@ var (
 	dropSchemaRe     = regexp.MustCompile(`(?i)^\s*DROP\s+SCHEMA\s+(IF\s+EXISTS\s+)?(("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?)\s*;?\s*$`)
 	useDatabaseRe    = regexp.MustCompile(`(?i)^\s*USE\s+DATABASE\s+("?[A-Za-z_][A-Za-z0-9_]*"?)\s*;?\s*$`)
 	useSchemaRe      = regexp.MustCompile(`(?i)^\s*USE\s+(?:SCHEMA\s+)?("?[A-Za-z_][A-Za-z0-9_]*"?)\s*;?\s*$`)
+	createStreamRe   = regexp.MustCompile(`(?i)^\s*CREATE\s+STREAM\s+(IF\s+NOT\s+EXISTS\s+)?(("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?)\s+ON\s+TABLE\s+(("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?(?:("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?)(.*)$`)
+	dropStreamRe     = regexp.MustCompile(`(?i)^\s*DROP\s+STREAM\s+(IF\s+EXISTS\s+)?(("?[A-Za-z_][A-Za-z0-9_]*"?)\.)?("?[A-Za-z_][A-Za-z0-9_]*"?)\s*;?\s*$`)
 )
 
 // normalizeIdentifier strips quotes and uppercases unquoted identifiers.
@@ -239,6 +241,82 @@ func ParseDescribeTable(sql string) (*DescribeTableStmt, error) {
 		stmt.Schema = normalizeIdentifier(matches[1])
 	}
 	stmt.Table = normalizeIdentifier(matches[3])
+
+	return stmt, nil
+}
+
+// CreateStreamStmt represents a parsed CREATE STREAM statement.
+type CreateStreamStmt struct {
+	Schema          string // schema of the stream (empty if not specified)
+	Name            string
+	SourceSchema    string // schema of source table (empty if not specified)
+	SourceTable     string
+	AppendOnly      bool
+	ShowInitialRows bool
+	IfNotExists     bool
+}
+
+// DropStreamStmt represents a parsed DROP STREAM statement.
+type DropStreamStmt struct {
+	Schema   string // empty if not specified
+	Name     string
+	IfExists bool
+}
+
+// ParseCreateStream parses a CREATE STREAM statement.
+// Supports: CREATE STREAM [IF NOT EXISTS] [schema.]name ON TABLE [schema.]table [APPEND_ONLY = TRUE/FALSE] [SHOW_INITIAL_ROWS = TRUE/FALSE]
+func ParseCreateStream(sql string) (*CreateStreamStmt, error) {
+	matches := createStreamRe.FindStringSubmatch(sql)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid CREATE STREAM statement: %s", sql)
+	}
+
+	stmt := &CreateStreamStmt{
+		Name:        normalizeIdentifier(matches[4]),
+		SourceTable: normalizeIdentifier(matches[8]),
+		IfNotExists: matches[1] != "",
+	}
+
+	// Stream schema (matches[3])
+	if matches[3] != "" {
+		stmt.Schema = normalizeIdentifier(matches[3])
+	}
+
+	// Source table schema — could be in matches[6] (two-part) or matches[7] (three-part prefix)
+	if matches[7] != "" {
+		stmt.SourceSchema = normalizeIdentifier(matches[7])
+	} else if matches[6] != "" {
+		stmt.SourceSchema = normalizeIdentifier(matches[6])
+	}
+
+	// Parse trailing options (matches[9])
+	options := strings.ToUpper(matches[9])
+	if strings.Contains(options, "APPEND_ONLY") {
+		stmt.AppendOnly = strings.Contains(options, "APPEND_ONLY = TRUE") || strings.Contains(options, "APPEND_ONLY=TRUE")
+	}
+	if strings.Contains(options, "SHOW_INITIAL_ROWS") {
+		stmt.ShowInitialRows = strings.Contains(options, "SHOW_INITIAL_ROWS = TRUE") || strings.Contains(options, "SHOW_INITIAL_ROWS=TRUE")
+	}
+
+	return stmt, nil
+}
+
+// ParseDropStream parses a DROP STREAM statement.
+// Supports: DROP STREAM [IF EXISTS] [schema.]name
+func ParseDropStream(sql string) (*DropStreamStmt, error) {
+	matches := dropStreamRe.FindStringSubmatch(sql)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid DROP STREAM statement: %s", sql)
+	}
+
+	stmt := &DropStreamStmt{
+		Name:     normalizeIdentifier(matches[4]),
+		IfExists: matches[1] != "",
+	}
+
+	if matches[3] != "" {
+		stmt.Schema = normalizeIdentifier(matches[3])
+	}
 
 	return stmt, nil
 }

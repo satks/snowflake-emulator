@@ -71,9 +71,11 @@ func main() {
 	// we create processors first, then configure executor with them.
 	copyProcessor := query.NewCopyProcessor(stageMgr, repo, executor)
 	mergeProcessor := query.NewMergeProcessor(executor)
+	streamProcessor := query.NewStreamProcessor(connMgr, repo)
 	executor.Configure(
 		query.WithCopyProcessor(copyProcessor),
 		query.WithMergeProcessor(mergeProcessor),
+		query.WithStreamProcessor(streamProcessor),
 	)
 
 	sessionHandler := handlers.NewSessionHandlerWithCatalogMode(sessionMgr, repo, catalogMode)
