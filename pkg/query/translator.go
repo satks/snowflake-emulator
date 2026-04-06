@@ -144,6 +144,14 @@ func (t *Translator) registerFunctions() {
 			return fn
 		},
 	}
+
+	// GET_PATH(obj, 'a.b.c') → json_extract_string(obj, '$.a.b.c')
+	t.functionMap["GET_PATH"] = FunctionTranslator{
+		Handler: func(fn *sqlparser.FuncExpr) sqlparser.Expr {
+			fn.Name = sqlparser.NewColIdent("__GET_PATH__")
+			return fn
+		},
+	}
 }
 
 // Translate converts Snowflake SQL to DuckDB-compatible SQL.
@@ -224,17 +232,37 @@ func (t *Translator) applyStringFallbackTranslations(sql string) string {
 		{regexp.MustCompile(`(?i)\bUUID_STRING\s*\(`), "uuid("},
 		{regexp.MustCompile(`(?i)\bARRAY_SIZE\s*\(`), "len("},
 		{regexp.MustCompile(`(?i)\bTO_VARCHAR\s*\(`), "strftime("},
+		{regexp.MustCompile(`(?i)\bGET_PATH\s*\(`), "json_extract_string("},
 	}
 
 	for _, r := range replacements {
 		sql = r.from.ReplaceAllString(sql, r.to)
 	}
 
-	// Also apply the post-processing transformations
+	// ::VARIANT cast → ::JSON
+	variantCastRe := regexp.MustCompile(`(?i)::VARIANT\b`)
+	sql = variantCastRe.ReplaceAllString(sql, "::JSON")
+
+	// CURRENT_TIMESTAMP/DATE transformations
 	sql = strings.ReplaceAll(sql, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
 	sql = strings.ReplaceAll(sql, "current_timestamp()", "CURRENT_TIMESTAMP")
 	sql = strings.ReplaceAll(sql, "CURRENT_DATE()", "CURRENT_DATE")
 	sql = strings.ReplaceAll(sql, "current_date()", "CURRENT_DATE")
+
+	// FLATTEN/UNNEST: strip TABLE() wrapper, INPUT => param, .VALUE references
+	// TABLE(UNNEST(...)) → UNNEST(...)
+	tableUnnestRe := regexp.MustCompile(`(?i)\bTABLE\s*\(\s*(UNNEST\s*\([^)]*\))\s*\)`)
+	sql = tableUnnestRe.ReplaceAllString(sql, "$1")
+
+	// INPUT => col → col (strip named parameter)
+	inputParamRe := regexp.MustCompile(`(?i)\bINPUT\s*=>\s*`)
+	sql = inputParamRe.ReplaceAllString(sql, "")
+
+	// alias.VALUE → alias (when UNNEST/FLATTEN is present in the query)
+	if strings.Contains(strings.ToUpper(sql), "UNNEST") || strings.Contains(strings.ToUpper(sql), "FLATTEN") {
+		valueRefRe := regexp.MustCompile(`(\w+)\.VALUE\b`)
+		sql = valueRefRe.ReplaceAllString(sql, "$1")
+	}
 
 	return sql
 }
@@ -255,6 +283,10 @@ func (t *Translator) translateDDLDefaults(sql string) string {
 	// CURRENT_DATE() → CURRENT_DATE
 	sql = strings.ReplaceAll(sql, "CURRENT_DATE()", "CURRENT_DATE")
 	sql = strings.ReplaceAll(sql, "current_date()", "CURRENT_DATE")
+
+	// ::VARIANT → ::JSON in DDL (e.g., column type definitions)
+	variantRe := regexp.MustCompile(`(?i)::VARIANT\b`)
+	sql = variantRe.ReplaceAllString(sql, "::JSON")
 
 	return sql
 }
@@ -312,6 +344,23 @@ func (t *Translator) handleComplexTransformations(sql string) string {
 		}
 		return fmt.Sprintf("timezone(%s)", args)
 	})
+
+	// Handle GET_PATH: __GET_PATH__(obj, 'a.b.c') → json_extract_string(obj, '$.a.b.c')
+	sql = t.transformMarkedFunction(sql, "__GET_PATH__", func(args string) string {
+		parts := splitFunctionArgs(args, 2)
+		if len(parts) == 2 {
+			obj := strings.TrimSpace(parts[0])
+			path := strings.TrimSpace(parts[1])
+			// Strip quotes from path, prepend $. for JSONPath
+			path = strings.Trim(path, "'\"")
+			return fmt.Sprintf("json_extract_string(%s, '$.%s')", obj, path)
+		}
+		return fmt.Sprintf("json_extract_string(%s)", args)
+	})
+
+	// Handle ::VARIANT cast → ::JSON (Snowflake VARIANT maps to DuckDB JSON)
+	variantCastRe := regexp.MustCompile(`(?i)::VARIANT\b`)
+	sql = variantCastRe.ReplaceAllString(sql, "::JSON")
 
 	return sql
 }

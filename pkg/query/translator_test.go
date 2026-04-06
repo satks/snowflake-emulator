@@ -741,7 +741,7 @@ func TestTranslator_FLATTEN(t *testing.T) {
 		{
 			name:     "FLATTENWithNamedParam_GracefulDegradation",
 			input:    "SELECT * FROM TABLE(FLATTEN(input => array_col))",
-			expected: "SELECT * FROM TABLE(UNNEST(input => array_col))", // Parser fails on => syntax, fallback applies FLATTEN→UNNEST
+			expected: "SELECT * FROM UNNEST(array_col)", // Fallback: FLATTEN→UNNEST, TABLE() stripped, INPUT=> stripped
 			wantErr:  false,
 		},
 	}
@@ -1325,6 +1325,130 @@ func TestTranslator_AlterTableClusterBy(t *testing.T) {
 	}
 	// DDL passes through unchanged (except DDL defaults)
 	if diff := cmp.Diff(input, result); diff != "" {
+		t.Errorf("Translate() mismatch:\n%s", diff)
+	}
+}
+
+// TestTranslator_VariantCast tests ::VARIANT → ::JSON cast translation.
+func TestTranslator_VariantCast(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "SimpleVariantCast",
+			input:    "SELECT 'vip'::VARIANT FROM users",
+			expected: "SELECT 'vip'::JSON FROM users", // AST parse fails, fallback applies
+		},
+		{
+			name:     "VariantCastInWhere",
+			input:    `SELECT * FROM users WHERE tag::VARIANT = 'test'::VARIANT`,
+			expected: `SELECT * FROM users WHERE tag::JSON = 'test'::JSON`,
+		},
+		{
+			name:     "VariantCastLowercase",
+			input:    "SELECT val::variant FROM data",
+			expected: "SELECT val::JSON FROM data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_GET_PATH tests GET_PATH function translation.
+func TestTranslator_GET_PATH(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "SimpleGetPath",
+			input:    "SELECT GET_PATH(metadata, 'city') FROM users",
+			expected: "select json_extract_string(metadata, '$.city') from users",
+		},
+		{
+			name:     "NestedGetPath",
+			input:    "SELECT GET_PATH(metadata, 'address.city') FROM users",
+			expected: "select json_extract_string(metadata, '$.address.city') from users",
+		},
+		{
+			name:     "DeepNestedGetPath",
+			input:    "SELECT GET_PATH(data, 'a.b.c.d') AS val FROM events",
+			expected: "select json_extract_string(data, '$.a.b.c.d') as val from events",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_FLATTENWithTable tests TABLE(FLATTEN(...)) pattern.
+func TestTranslator_FLATTENWithTable(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "TableFlattenInputParam",
+			input:    "SELECT _el.VALUE FROM users, TABLE(FLATTEN(INPUT => tags)) AS _el",
+			expected: "SELECT _el FROM users, UNNEST(tags) AS _el",
+		},
+		{
+			name:     "TableFlattenSimple",
+			input:    "SELECT _el.VALUE FROM data, TABLE(FLATTEN(arr_col)) AS _el WHERE _el.VALUE = 'test'",
+			expected: "SELECT _el FROM data, UNNEST(arr_col) AS _el WHERE _el = 'test'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translator := NewTranslator()
+			result, err := translator.Translate(tt.input)
+			if err != nil {
+				t.Fatalf("Translate() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.expected, result); diff != "" {
+				t.Errorf("Translate() mismatch:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestTranslator_FLATTENValueReference tests .VALUE stripping in FLATTEN context.
+func TestTranslator_FLATTENValueReference(t *testing.T) {
+	translator := NewTranslator()
+	input := `SELECT _el.VALUE::VARCHAR AS tag FROM items, TABLE(FLATTEN(INPUT => tags)) AS _el WHERE _el.VALUE::VARCHAR = 'vip'`
+	result, err := translator.Translate(input)
+	if err != nil {
+		t.Fatalf("Translate() error = %v", err)
+	}
+	// .VALUE stripped, ::VARCHAR passes through (DuckDB supports it natively), TABLE() stripped, INPUT=> stripped
+	expected := `SELECT _el::VARCHAR AS tag FROM items, UNNEST(tags) AS _el WHERE _el::VARCHAR = 'vip'`
+	if diff := cmp.Diff(expected, result); diff != "" {
 		t.Errorf("Translate() mismatch:\n%s", diff)
 	}
 }
