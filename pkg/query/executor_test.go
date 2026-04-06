@@ -704,8 +704,11 @@ func TestExecutor_ShowSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SHOW SCHEMAS error = %v", err)
 	}
-	if len(result.Columns) < 2 {
-		t.Fatalf("Expected at least 2 columns, got %d", len(result.Columns))
+	if len(result.Columns) != 10 {
+		t.Fatalf("Expected 10 columns (Snowflake-compatible), got %d: %v", len(result.Columns), result.Columns)
+	}
+	if result.Columns[1] != "name" {
+		t.Errorf("Expected column[1] = 'name', got %q", result.Columns[1])
 	}
 	if len(result.Rows) != 2 {
 		t.Errorf("Expected 2 schemas, got %d", len(result.Rows))
@@ -754,6 +757,12 @@ func TestExecutor_ShowTables(t *testing.T) {
 	result, err := executor.Query(ctx, `SHOW TABLES IN SHOW_DB.PUBLIC`)
 	if err != nil {
 		t.Fatalf("SHOW TABLES error = %v", err)
+	}
+	if len(result.Columns) != 11 {
+		t.Fatalf("Expected 11 columns (Snowflake-compatible), got %d: %v", len(result.Columns), result.Columns)
+	}
+	if result.Columns[1] != "name" {
+		t.Errorf("Expected column[1] = 'name', got %q", result.Columns[1])
 	}
 	if len(result.Rows) != 2 {
 		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
@@ -861,6 +870,13 @@ func TestExecutor_DescribeTable(t *testing.T) {
 	result, err := executor.Query(ctx, `DESCRIBE TABLE DESC_DB.PUBLIC.USERS`)
 	if err != nil {
 		t.Fatalf("DESCRIBE TABLE error = %v", err)
+	}
+	if len(result.Columns) != 12 {
+		t.Fatalf("Expected 12 columns (Snowflake-compatible), got %d: %v", len(result.Columns), result.Columns)
+	}
+	// Verify SDK-critical column names
+	if result.Columns[0] != "name" || result.Columns[1] != "type" || result.Columns[3] != "null?" {
+		t.Errorf("Missing SDK-critical columns, got: %v", result.Columns)
 	}
 	if len(result.Rows) != 3 {
 		t.Errorf("Expected 3 columns described, got %d", len(result.Rows))
