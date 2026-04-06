@@ -831,7 +831,7 @@ func (e *Executor) queryDescribeTable(ctx context.Context, sql string) (*Result,
 		return result, nil
 	}
 
-	// Fallback: use DuckDB native DESCRIBE
+	// Fallback: use DuckDB native DESCRIBE and remap columns to Snowflake format
 	tableName := stmt.Table
 	if stmt.Schema != "" {
 		tableName = stmt.Schema + "." + tableName
@@ -851,27 +851,87 @@ func (e *Executor) queryDescribeTable(ctx context.Context, sql string) (*Result,
 	}
 	defer func() { _ = rows.Close() }()
 
-	columns, _ := rows.Columns()
-	columnTypes := InferColumnMetadata(columns, rows)
+	duckColumns, _ := rows.Columns()
 
-	var resultRows [][]interface{}
+	// Map DuckDB column indices by name for remapping
+	duckColIndex := make(map[string]int)
+	for i, c := range duckColumns {
+		duckColIndex[strings.ToLower(c)] = i
+	}
+
+	var duckRows [][]interface{}
 	for rows.Next() {
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
+		values := make([]interface{}, len(duckColumns))
+		valuePtrs := make([]interface{}, len(duckColumns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return nil, fmt.Errorf("failed to scan DESCRIBE row: %w", err)
 		}
-		row := make([]interface{}, len(columns))
+		row := make([]interface{}, len(duckColumns))
 		for i, val := range values {
 			row[i] = convertValue(val)
 		}
-		resultRows = append(resultRows, row)
+		duckRows = append(duckRows, row)
 	}
 
-	return &Result{Columns: columns, ColumnTypes: columnTypes, Rows: resultRows}, nil
+	// Remap DuckDB columns to Snowflake DESCRIBE TABLE format
+	sfColumns := []string{"name", "type", "kind", "null?", "default", "primary key", "unique key", "check", "expression", "comment", "policy name", "privacy domain"}
+	// DuckDB DESCRIBE returns: column_name, column_type, null, key, default, extra
+	duckToSF := map[string]string{
+		"column_name": "name",
+		"column_type": "type",
+		"null":        "null?",
+		"key":         "primary key",
+		"default":     "default",
+		"extra":       "comment",
+	}
+
+	var sfRows [][]interface{}
+	for _, duckRow := range duckRows {
+		sfRow := make([]interface{}, len(sfColumns))
+		// Initialize with empty defaults
+		for i := range sfRow {
+			sfRow[i] = ""
+		}
+		sfRow[2] = "COLUMN" // kind
+
+		for duckName, sfName := range duckToSF {
+			dIdx, ok := duckColIndex[duckName]
+			if !ok {
+				continue
+			}
+			// Find sfName index in sfColumns
+			for sIdx, sc := range sfColumns {
+				if sc == sfName {
+					val := duckRow[dIdx]
+					// Normalize null? column: DuckDB returns "YES"/"NO", Snowflake expects "Y"/"N"
+					if sfName == "null?" {
+						switch fmt.Sprintf("%v", val) {
+						case "YES":
+							val = "Y"
+						case "NO":
+							val = "N"
+						}
+					}
+					// Normalize primary key: DuckDB returns "PRI" or empty
+					if sfName == "primary key" {
+						if fmt.Sprintf("%v", val) == "PRI" {
+							val = "Y"
+						} else {
+							val = "N"
+						}
+					}
+					sfRow[sIdx] = val
+					break
+				}
+			}
+		}
+		sfRows = append(sfRows, sfRow)
+	}
+
+	return &Result{Columns: sfColumns, ColumnTypes: buildColumnTypes(sfColumns), Rows: sfRows}, nil
 }
 
 // describeTableFromMetadata attempts to describe a table using the metadata repository.

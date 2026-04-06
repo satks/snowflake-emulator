@@ -303,7 +303,7 @@ func (r *Repository) GetDatabaseByName(ctx context.Context, name string) (*Datab
 	normalizedName := strings.ToUpper(name)
 
 	query := `SELECT id, name, account_id, comment, created_at, owner
-	          FROM _metadata_databases WHERE name = ?`
+	          FROM _metadata_databases WHERE UPPER(name) = UPPER(?)`
 
 	row := r.mgr.DB().QueryRowContext(ctx, query, normalizedName)
 
@@ -503,9 +503,9 @@ func (r *Repository) GetSchema(ctx context.Context, id string) (*Schema, error) 
 // GetSchemaByName retrieves a schema by database ID and name.
 func (r *Repository) GetSchemaByName(ctx context.Context, databaseID, name string) (*Schema, error) {
 	query := `SELECT id, database_id, name, comment, created_at, owner
-	          FROM _metadata_schemas WHERE database_id = ? AND name = ?`
+	          FROM _metadata_schemas WHERE database_id = ? AND UPPER(name) = UPPER(?)`
 
-	row := r.mgr.DB().QueryRowContext(ctx, query, databaseID, strings.ToUpper(name))
+	row := r.mgr.DB().QueryRowContext(ctx, query, databaseID, name)
 
 	var schema Schema
 	var createdAt sql.NullTime
@@ -733,9 +733,9 @@ func (r *Repository) GetTable(ctx context.Context, id string) (*Table, error) {
 // GetTableByName retrieves a table by schema ID and name.
 func (r *Repository) GetTableByName(ctx context.Context, schemaID, name string) (*Table, error) {
 	query := `SELECT id, schema_id, name, table_type, comment, created_at, owner, clustering_key, column_definitions
-	          FROM _metadata_tables WHERE schema_id = ? AND name = ?`
+	          FROM _metadata_tables WHERE schema_id = ? AND UPPER(name) = UPPER(?)`
 
-	row := r.mgr.DB().QueryRowContext(ctx, query, schemaID, strings.ToUpper(name))
+	row := r.mgr.DB().QueryRowContext(ctx, query, schemaID, name)
 
 	var table Table
 	var createdAt sql.NullTime
