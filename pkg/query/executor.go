@@ -911,7 +911,7 @@ func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *Describe
 		return nil, err
 	}
 
-	columns := []string{"name", "type", "kind", "null?", "default", "primary key"}
+	columns := []string{"name", "type", "kind", "null?", "default", "primary key", "unique key", "check", "expression", "comment", "policy name", "privacy domain"}
 	var rows [][]interface{}
 
 	if table.ColumnDefinitions != "" {
@@ -950,6 +950,12 @@ func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *Describe
 				nullDisplay,
 				defaultVal,
 				pkDisplay,
+				"N",  // unique key
+				"",   // check
+				"",   // expression
+				"",   // comment
+				"",   // policy name
+				"",   // privacy domain
 			})
 		}
 	}

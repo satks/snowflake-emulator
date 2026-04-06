@@ -871,6 +871,13 @@ func TestExecutor_DescribeTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DESCRIBE TABLE error = %v", err)
 	}
+	if len(result.Columns) != 12 {
+		t.Fatalf("Expected 12 columns (Snowflake-compatible), got %d: %v", len(result.Columns), result.Columns)
+	}
+	// Verify SDK-critical column names
+	if result.Columns[0] != "name" || result.Columns[1] != "type" || result.Columns[3] != "null?" {
+		t.Errorf("Missing SDK-critical columns, got: %v", result.Columns)
+	}
 	if len(result.Rows) != 3 {
 		t.Errorf("Expected 3 columns described, got %d", len(result.Rows))
 	}
