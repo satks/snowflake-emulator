@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -766,6 +767,47 @@ func TestExecutor_ShowTables(t *testing.T) {
 	}
 	if len(result.Rows) != 2 {
 		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	}
+}
+
+// TestExecutor_ShowTablesDiscoversSQLCreatedTables verifies that SHOW TABLES finds tables
+// created via direct SQL (not registered in metadata) by querying DuckDB's information_schema.
+func TestExecutor_ShowTablesDiscoversSQLCreatedTables(t *testing.T) {
+	executor, repo := setupTestExecutor(t)
+	ctx := context.Background()
+
+	// Create database and schema in metadata
+	db, _ := repo.CreateDatabase(ctx, "DISC_DB", "")
+	_, _ = repo.CreateSchema(ctx, db.ID, "PUBLIC", "")
+
+	// Create a table via direct SQL (bypasses metadata registration)
+	_, err := executor.Execute(ctx, "CREATE TABLE DISC_DB.PUBLIC_SQL_TABLE (id INTEGER, name VARCHAR)")
+	if err != nil {
+		t.Fatalf("CREATE TABLE via SQL error = %v", err)
+	}
+
+	// Also create one via metadata for comparison
+	cols := []metadata.ColumnDef{{Name: "ID", Type: "INTEGER"}}
+	_, _ = repo.CreateTable(ctx, db.ID, "META_TABLE", cols, "")
+
+	result, err := executor.Query(ctx, `SHOW TABLES IN DISC_DB.PUBLIC`)
+	if err != nil {
+		t.Fatalf("SHOW TABLES error = %v", err)
+	}
+
+	// Should find at least the SQL-created table
+	found := false
+	for _, row := range result.Rows {
+		if name, ok := row[1].(string); ok && strings.Contains(strings.ToUpper(name), "SQL_TABLE") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("SHOW TABLES should discover tables created via SQL, got %d rows", len(result.Rows))
+		for _, row := range result.Rows {
+			t.Logf("  row: %v", row)
+		}
 	}
 }
 

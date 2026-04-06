@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nnnkkk7/snowflake-emulator/pkg/config"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/connection"
 	"github.com/nnnkkk7/snowflake-emulator/pkg/metadata"
 	"github.com/nnnkkk7/snowflake-emulator/server/types"
@@ -746,6 +747,7 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 
 	columns := []string{"created_on", "name", "database_name", "schema_name", "kind", "comment", "cluster_by", "rows", "bytes", "owner", "retention_time"}
 	var rows [][]interface{}
+	seen := make(map[string]bool) // track table names to deduplicate
 
 	buildRow := func(tableName, dbName, schemaName, kind, createdAt string) []interface{} {
 		if kind == "" {
@@ -754,66 +756,139 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 		return []interface{}{createdAt, tableName, dbName, schemaName, kind, "", "", int64(0), int64(0), "", "1"}
 	}
 
+	addRow := func(tableName, dbName, schemaName, kind, createdAt string) {
+		key := strings.ToUpper(dbName + "." + schemaName + "." + tableName)
+		if !seen[key] {
+			seen[key] = true
+			rows = append(rows, buildRow(tableName, dbName, schemaName, kind, createdAt))
+		}
+	}
+
 	if stmt.Database != "" && stmt.Schema != "" {
 		// Fully qualified: db.schema
 		db, err := e.repo.GetDatabaseByName(ctx, stmt.Database)
-		if err != nil {
-			return nil, fmt.Errorf("database %s not found: %w", stmt.Database, err)
+		if err == nil {
+			schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+			if err == nil {
+				tables, err := e.repo.ListTables(ctx, schema.ID)
+				if err == nil {
+					for _, t := range tables {
+						addRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339))
+					}
+				}
+			}
 		}
-		schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
-		if err != nil {
-			return nil, fmt.Errorf("schema %s not found: %w", stmt.Schema, err)
-		}
-		tables, err := e.repo.ListTables(ctx, schema.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list tables: %w", err)
-		}
-		for _, t := range tables {
-			rows = append(rows, buildRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
-		}
+		// Also query DuckDB's information_schema for tables not in metadata
+		e.addTablesFromDuckDB(ctx, stmt.Database, stmt.Schema, addRow)
 	} else if stmt.Schema != "" {
 		// Schema only: find first matching schema across databases
 		databases, err := e.repo.ListDatabases(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list databases: %w", err)
-		}
-		for _, db := range databases {
-			schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
-			if err != nil {
-				continue
-			}
-			tables, err := e.repo.ListTables(ctx, schema.ID)
-			if err != nil {
-				continue
-			}
-			for _, t := range tables {
-				rows = append(rows, buildRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
+		if err == nil {
+			for _, db := range databases {
+				schema, err := e.repo.GetSchemaByName(ctx, db.ID, stmt.Schema)
+				if err != nil {
+					continue
+				}
+				tables, err := e.repo.ListTables(ctx, schema.ID)
+				if err != nil {
+					continue
+				}
+				for _, t := range tables {
+					addRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339))
+				}
+				// Also query DuckDB
+				e.addTablesFromDuckDB(ctx, db.Name, stmt.Schema, addRow)
 			}
 		}
 	} else {
 		// Bare SHOW TABLES: list all tables across all databases/schemas
 		databases, err := e.repo.ListDatabases(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list databases: %w", err)
-		}
-		for _, db := range databases {
-			schemas, err := e.repo.ListSchemas(ctx, db.ID)
-			if err != nil {
-				continue
-			}
-			for _, s := range schemas {
-				tables, err := e.repo.ListTables(ctx, s.ID)
+		if err == nil {
+			for _, db := range databases {
+				schemas, err := e.repo.ListSchemas(ctx, db.ID)
 				if err != nil {
 					continue
 				}
-				for _, t := range tables {
-					rows = append(rows, buildRow(t.Name, db.Name, s.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
+				for _, s := range schemas {
+					tables, err := e.repo.ListTables(ctx, s.ID)
+					if err != nil {
+						continue
+					}
+					for _, t := range tables {
+						addRow(t.Name, db.Name, s.Name, t.TableType, t.CreatedAt.Format(time.RFC3339))
+					}
+					// Also query DuckDB
+					e.addTablesFromDuckDB(ctx, db.Name, s.Name, addRow)
 				}
 			}
 		}
 	}
 
 	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
+}
+
+// addTablesFromDuckDB queries DuckDB for tables not registered in metadata.
+// In catalog mode, queries the attached catalog's information_schema.
+// In legacy mode, queries the default information_schema for tables matching the naming pattern.
+func (e *Executor) addTablesFromDuckDB(ctx context.Context, database, schema string, addRow func(tableName, dbName, schemaName, kind, createdAt string)) {
+	now := time.Now().Format(time.RFC3339)
+	upperDB := strings.ToUpper(database)
+	upperSchema := strings.ToUpper(schema)
+
+	if config.IsCatalogMode() {
+		// Catalog mode: query the attached catalog's information_schema
+		infoSQL := fmt.Sprintf(
+			`SELECT table_name, table_type FROM "%s".information_schema.tables WHERE UPPER(table_schema) = '%s'`,
+			upperDB, upperSchema,
+		)
+		dbRows, err := e.mgr.Query(ctx, infoSQL)
+		if err != nil {
+			return
+		}
+		defer func() { _ = dbRows.Close() }()
+
+		for dbRows.Next() {
+			var tableName, tableType string
+			if err := dbRows.Scan(&tableName, &tableType); err != nil {
+				continue
+			}
+			kind := "TABLE"
+			if tableType == "VIEW" {
+				kind = "VIEW"
+			}
+			addRow(strings.ToUpper(tableName), upperDB, upperSchema, kind, now)
+		}
+	} else {
+		// Legacy mode: tables are named {DB}.{SCHEMA}_{TABLE}
+		// Query DuckDB's information_schema and filter by prefix
+		prefix := upperSchema + "_"
+		infoSQL := fmt.Sprintf(
+			`SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = '%s'`,
+			upperDB,
+		)
+		dbRows, err := e.mgr.Query(ctx, infoSQL)
+		if err != nil {
+			return
+		}
+		defer func() { _ = dbRows.Close() }()
+
+		for dbRows.Next() {
+			var tableName, tableType string
+			if err := dbRows.Scan(&tableName, &tableType); err != nil {
+				continue
+			}
+			upperName := strings.ToUpper(tableName)
+			if strings.HasPrefix(upperName, prefix) {
+				// Strip the schema prefix to get the Snowflake table name
+				sfTableName := upperName[len(prefix):]
+				kind := "TABLE"
+				if tableType == "VIEW" {
+					kind = "VIEW"
+				}
+				addRow(sfTableName, upperDB, upperSchema, kind, now)
+			}
+		}
+	}
 }
 
 // queryDescribeTable handles DESCRIBE TABLE [db.][schema.]table.
