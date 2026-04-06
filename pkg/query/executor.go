@@ -827,18 +827,18 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 	return &Result{Columns: columns, ColumnTypes: buildColumnTypes(columns), Rows: rows}, nil
 }
 
-// addTablesFromDuckDB queries DuckDB for tables not registered in metadata.
-// In catalog mode, queries the attached catalog's information_schema.
-// In legacy mode, queries the default information_schema for tables matching the naming pattern.
+// addTablesFromDuckDB queries DuckDB's duckdb_tables() system function to discover
+// tables not registered in the metadata layer. duckdb_tables() works reliably across
+// all catalogs (default + attached), unlike information_schema which only covers the default.
 func (e *Executor) addTablesFromDuckDB(ctx context.Context, database, schema string, addRow func(tableName, dbName, schemaName, kind, createdAt string)) {
 	now := time.Now().Format(time.RFC3339)
 	upperDB := strings.ToUpper(database)
 	upperSchema := strings.ToUpper(schema)
 
 	if config.IsCatalogMode() {
-		// Catalog mode: query the attached catalog's information_schema
+		// Catalog mode: query duckdb_tables() filtering by catalog and schema
 		infoSQL := fmt.Sprintf(
-			`SELECT table_name, table_type FROM "%s".information_schema.tables WHERE UPPER(table_schema) = '%s'`,
+			`SELECT table_name FROM duckdb_tables() WHERE UPPER(database_name) = '%s' AND UPPER(schema_name) = '%s'`,
 			upperDB, upperSchema,
 		)
 		dbRows, err := e.mgr.Query(ctx, infoSQL)
@@ -848,22 +848,18 @@ func (e *Executor) addTablesFromDuckDB(ctx context.Context, database, schema str
 		defer func() { _ = dbRows.Close() }()
 
 		for dbRows.Next() {
-			var tableName, tableType string
-			if err := dbRows.Scan(&tableName, &tableType); err != nil {
+			var tableName string
+			if err := dbRows.Scan(&tableName); err != nil {
 				continue
 			}
-			kind := "TABLE"
-			if tableType == "VIEW" {
-				kind = "VIEW"
-			}
-			addRow(strings.ToUpper(tableName), upperDB, upperSchema, kind, now)
+			addRow(strings.ToUpper(tableName), upperDB, upperSchema, "TABLE", now)
 		}
 	} else {
-		// Legacy mode: tables are named {DB}.{SCHEMA}_{TABLE}
-		// Query DuckDB's information_schema and filter by prefix
+		// Legacy mode: Snowflake DB maps to DuckDB schema, tables named {SCHEMA}_{TABLE}
+		// DuckDB database_name is the SF database, table names have {SCHEMA}_ prefix
 		prefix := upperSchema + "_"
 		infoSQL := fmt.Sprintf(
-			`SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = '%s'`,
+			`SELECT table_name FROM duckdb_tables() WHERE UPPER(schema_name) = '%s'`,
 			upperDB,
 		)
 		dbRows, err := e.mgr.Query(ctx, infoSQL)
@@ -873,19 +869,14 @@ func (e *Executor) addTablesFromDuckDB(ctx context.Context, database, schema str
 		defer func() { _ = dbRows.Close() }()
 
 		for dbRows.Next() {
-			var tableName, tableType string
-			if err := dbRows.Scan(&tableName, &tableType); err != nil {
+			var tableName string
+			if err := dbRows.Scan(&tableName); err != nil {
 				continue
 			}
 			upperName := strings.ToUpper(tableName)
 			if strings.HasPrefix(upperName, prefix) {
-				// Strip the schema prefix to get the Snowflake table name
 				sfTableName := upperName[len(prefix):]
-				kind := "TABLE"
-				if tableType == "VIEW" {
-					kind = "VIEW"
-				}
-				addRow(sfTableName, upperDB, upperSchema, kind, now)
+				addRow(sfTableName, upperDB, upperSchema, "TABLE", now)
 			}
 		}
 	}
@@ -1099,38 +1090,64 @@ func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *Describe
 }
 
 // queryInformationSchemaTables handles SELECT ... FROM INFORMATION_SCHEMA.TABLES queries.
-// DuckDB doesn't expose INFORMATION_SCHEMA for attached catalogs, so we answer from metadata.
+// Combines metadata registry with duckdb_tables() to discover all tables including
+// those created via SQL without metadata registration.
 func (e *Executor) queryInformationSchemaTables(ctx context.Context, _ string) (*Result, error) {
 	columns := []string{"TABLE_CATALOG", "TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE"}
 	var rows [][]interface{}
+	seen := make(map[string]bool)
 
-	databases, err := e.repo.ListDatabases(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list databases: %w", err)
+	addRow := func(dbName, schemaName, tableName, tableType string) {
+		key := strings.ToUpper(dbName + "." + schemaName + "." + tableName)
+		if !seen[key] {
+			seen[key] = true
+			rows = append(rows, []interface{}{
+				strings.ToUpper(dbName),
+				strings.ToUpper(schemaName),
+				strings.ToUpper(tableName),
+				tableType,
+			})
+		}
 	}
 
-	for _, db := range databases {
-		schemas, err := e.repo.ListSchemas(ctx, db.ID)
-		if err != nil {
-			continue
-		}
-		for _, s := range schemas {
-			tables, err := e.repo.ListTables(ctx, s.ID)
+	// First: metadata registry
+	databases, err := e.repo.ListDatabases(ctx)
+	if err == nil {
+		for _, db := range databases {
+			schemas, err := e.repo.ListSchemas(ctx, db.ID)
 			if err != nil {
 				continue
 			}
-			for _, t := range tables {
-				tableType := "BASE TABLE"
-				if t.TableType != "" {
-					tableType = t.TableType
+			for _, s := range schemas {
+				tables, err := e.repo.ListTables(ctx, s.ID)
+				if err != nil {
+					continue
 				}
-				rows = append(rows, []interface{}{
-					db.Name,
-					s.Name,
-					t.Name,
-					tableType,
-				})
+				for _, t := range tables {
+					tableType := "BASE TABLE"
+					if t.TableType != "" {
+						tableType = t.TableType
+					}
+					addRow(db.Name, s.Name, t.Name, tableType)
+				}
 			}
+		}
+	}
+
+	// Second: duckdb_tables() for SQL-created tables not in metadata
+	dbRows, err := e.mgr.Query(ctx, `SELECT database_name, schema_name, table_name FROM duckdb_tables()`)
+	if err == nil {
+		defer func() { _ = dbRows.Close() }()
+		for dbRows.Next() {
+			var dbName, schemaName, tableName string
+			if err := dbRows.Scan(&dbName, &schemaName, &tableName); err != nil {
+				continue
+			}
+			// Skip internal metadata tables
+			if strings.HasPrefix(strings.ToLower(tableName), "_metadata_") {
+				continue
+			}
+			addRow(dbName, schemaName, tableName, "BASE TABLE")
 		}
 	}
 

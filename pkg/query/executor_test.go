@@ -887,8 +887,23 @@ func TestExecutor_InformationSchemaTables(t *testing.T) {
 	if diff := cmp.Diff([]string{"TABLE_CATALOG", "TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE"}, result.Columns); diff != "" {
 		t.Errorf("Columns mismatch:\n%s", diff)
 	}
-	if len(result.Rows) != 2 {
-		t.Errorf("Expected 2 tables, got %d", len(result.Rows))
+	if len(result.Rows) < 2 {
+		t.Errorf("Expected at least 2 tables, got %d", len(result.Rows))
+	}
+	// Verify our tables are present (uppercase)
+	foundUsers, foundOrders := false, false
+	for _, row := range result.Rows {
+		if name, ok := row[2].(string); ok {
+			if name == "USERS" {
+				foundUsers = true
+			}
+			if name == "ORDERS" {
+				foundOrders = true
+			}
+		}
+	}
+	if !foundUsers || !foundOrders {
+		t.Errorf("Expected USERS and ORDERS in results, foundUsers=%v foundOrders=%v", foundUsers, foundOrders)
 	}
 	if len(result.ColumnTypes) != 4 {
 		t.Errorf("Expected 4 ColumnTypes, got %d", len(result.ColumnTypes))
