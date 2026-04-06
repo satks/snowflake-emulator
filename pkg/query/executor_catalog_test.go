@@ -445,8 +445,8 @@ func TestCatalogExecutor_ShowSchemas(t *testing.T) {
 		t.Errorf("Expected 3 schemas (PUBLIC+ALPHA+BETA), got %d", len(result.Rows))
 	}
 
-	// Verify column names
-	if result.Columns[0] != "created_on" || result.Columns[1] != "name" || result.Columns[2] != "database_name" {
+	// Verify key column names (Snowflake-compatible 10-column format)
+	if result.Columns[0] != "created_on" || result.Columns[1] != "name" || result.Columns[4] != "database_name" {
 		t.Errorf("Unexpected columns: %v", result.Columns)
 	}
 }

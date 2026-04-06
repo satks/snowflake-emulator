@@ -697,8 +697,12 @@ func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, e
 		return nil, fmt.Errorf("failed to parse SHOW SCHEMAS: %w", err)
 	}
 
-	columns := []string{"created_on", "name", "database_name"}
+	columns := []string{"created_on", "name", "is_default", "is_current", "database_name", "owner", "comment", "options", "retention_time", "owner_role_type"}
 	var rows [][]interface{}
+
+	buildRow := func(schemaName, dbName, createdAt string) []interface{} {
+		return []interface{}{createdAt, schemaName, "N", "N", dbName, "", "", "", "1", ""}
+	}
 
 	if stmt.Database != "" {
 		// Show schemas in specific database
@@ -711,11 +715,7 @@ func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, e
 			return nil, fmt.Errorf("failed to list schemas: %w", err)
 		}
 		for _, s := range schemas {
-			rows = append(rows, []interface{}{
-				s.CreatedAt.Format(time.RFC3339),
-				s.Name,
-				db.Name,
-			})
+			rows = append(rows, buildRow(s.Name, db.Name, s.CreatedAt.Format(time.RFC3339)))
 		}
 	} else {
 		// Show schemas across all databases
@@ -729,11 +729,7 @@ func (e *Executor) queryShowSchemas(ctx context.Context, sql string) (*Result, e
 				continue
 			}
 			for _, s := range schemas {
-				rows = append(rows, []interface{}{
-					s.CreatedAt.Format(time.RFC3339),
-					s.Name,
-					db.Name,
-				})
+				rows = append(rows, buildRow(s.Name, db.Name, s.CreatedAt.Format(time.RFC3339)))
 			}
 		}
 	}
@@ -748,8 +744,15 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 		return nil, fmt.Errorf("failed to parse SHOW TABLES: %w", err)
 	}
 
-	columns := []string{"created_on", "name", "database_name", "schema_name", "kind"}
+	columns := []string{"created_on", "name", "database_name", "schema_name", "kind", "comment", "cluster_by", "rows", "bytes", "owner", "retention_time"}
 	var rows [][]interface{}
+
+	buildRow := func(tableName, dbName, schemaName, kind, createdAt string) []interface{} {
+		if kind == "" {
+			kind = "TABLE"
+		}
+		return []interface{}{createdAt, tableName, dbName, schemaName, kind, "", "", int64(0), int64(0), "", "1"}
+	}
 
 	if stmt.Database != "" && stmt.Schema != "" {
 		// Fully qualified: db.schema
@@ -766,13 +769,7 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 			return nil, fmt.Errorf("failed to list tables: %w", err)
 		}
 		for _, t := range tables {
-			rows = append(rows, []interface{}{
-				t.CreatedAt.Format(time.RFC3339),
-				t.Name,
-				db.Name,
-				schema.Name,
-				t.TableType,
-			})
+			rows = append(rows, buildRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
 		}
 	} else if stmt.Schema != "" {
 		// Schema only: find first matching schema across databases
@@ -790,13 +787,7 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 				continue
 			}
 			for _, t := range tables {
-				rows = append(rows, []interface{}{
-					t.CreatedAt.Format(time.RFC3339),
-					t.Name,
-					db.Name,
-					schema.Name,
-					t.TableType,
-				})
+				rows = append(rows, buildRow(t.Name, db.Name, schema.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
 			}
 		}
 	} else {
@@ -816,13 +807,7 @@ func (e *Executor) queryShowTables(ctx context.Context, sql string) (*Result, er
 					continue
 				}
 				for _, t := range tables {
-					rows = append(rows, []interface{}{
-						t.CreatedAt.Format(time.RFC3339),
-						t.Name,
-						db.Name,
-						s.Name,
-						t.TableType,
-					})
+					rows = append(rows, buildRow(t.Name, db.Name, s.Name, t.TableType, t.CreatedAt.Format(time.RFC3339)))
 				}
 			}
 		}
