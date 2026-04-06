@@ -72,6 +72,21 @@ type Stage struct {
 	Owner     string
 }
 
+// Stream represents a Snowflake stream for change data capture.
+type Stream struct {
+	ID              string
+	SchemaID        string
+	Name            string
+	SourceTableID   string
+	AppendOnly      bool
+	ShowInitialRows bool
+	ChangelogTable  string // DuckDB table name for the changelog
+	CurrentOffset   int64  // Current consumption offset (event_id)
+	Comment         string
+	CreatedAt       time.Time
+	Owner           string
+}
+
 // FileFormat represents a Snowflake file format.
 type FileFormat struct {
 	ID         string
@@ -161,6 +176,20 @@ func (r *Repository) initMetadataTables(ctx context.Context) error {
 			name VARCHAR NOT NULL,
 			format_type VARCHAR NOT NULL,
 			options VARCHAR,
+			comment VARCHAR,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			owner VARCHAR,
+			UNIQUE(schema_id, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS _metadata_streams (
+			id VARCHAR PRIMARY KEY,
+			schema_id VARCHAR NOT NULL,
+			name VARCHAR NOT NULL,
+			source_table_id VARCHAR NOT NULL,
+			append_only BOOLEAN DEFAULT FALSE,
+			show_initial_rows BOOLEAN DEFAULT FALSE,
+			changelog_table VARCHAR NOT NULL,
+			current_offset BIGINT DEFAULT 0,
 			comment VARCHAR,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			owner VARCHAR,
@@ -1352,6 +1381,199 @@ func (r *Repository) DropStage(ctx context.Context, id string) error {
 		return fmt.Errorf("stage with ID %s not found", id)
 	}
 
+	return nil
+}
+
+// Stream CRUD Operations
+
+// CreateStream creates a new stream in the specified schema.
+func (r *Repository) CreateStream(ctx context.Context, schemaID, name, sourceTableID string, appendOnly, showInitialRows bool, changelogTable, comment string) (*Stream, error) {
+	if name == "" {
+		return nil, fmt.Errorf("stream name cannot be empty")
+	}
+
+	normalizedName := strings.ToUpper(name)
+	id := uuid.New().String()
+
+	query := `INSERT INTO _metadata_streams (id, schema_id, name, source_table_id, append_only, show_initial_rows, changelog_table, current_offset, comment, created_at, owner)
+	          VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, ?)`
+	_, err := r.mgr.Exec(ctx, query, id, schemaID, normalizedName, sourceTableID, appendOnly, showInitialRows, changelogTable, comment, "")
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "Constraint Error") {
+			return nil, fmt.Errorf("stream %s already exists", normalizedName)
+		}
+		return nil, fmt.Errorf("failed to create stream: %w", err)
+	}
+
+	return r.GetStream(ctx, id)
+}
+
+// GetStream retrieves a stream by ID.
+func (r *Repository) GetStream(ctx context.Context, id string) (*Stream, error) {
+	query := `SELECT id, schema_id, name, source_table_id, append_only, show_initial_rows, changelog_table, current_offset, comment, created_at, owner
+	          FROM _metadata_streams WHERE id = ?`
+
+	row := r.mgr.DB().QueryRowContext(ctx, query, id)
+
+	var s Stream
+	var createdAt sql.NullTime
+	var comment, owner sql.NullString
+
+	err := row.Scan(&s.ID, &s.SchemaID, &s.Name, &s.SourceTableID, &s.AppendOnly, &s.ShowInitialRows, &s.ChangelogTable, &s.CurrentOffset, &comment, &createdAt, &owner)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("stream with ID %s not found", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stream: %w", err)
+	}
+
+	if createdAt.Valid {
+		s.CreatedAt = createdAt.Time
+	}
+	if comment.Valid {
+		s.Comment = comment.String
+	}
+	if owner.Valid {
+		s.Owner = owner.String
+	}
+
+	return &s, nil
+}
+
+// GetStreamByName retrieves a stream by schema ID and name.
+func (r *Repository) GetStreamByName(ctx context.Context, schemaID, name string) (*Stream, error) {
+	normalizedName := strings.ToUpper(name)
+	query := `SELECT id, schema_id, name, source_table_id, append_only, show_initial_rows, changelog_table, current_offset, comment, created_at, owner
+	          FROM _metadata_streams WHERE schema_id = ? AND name = ?`
+
+	row := r.mgr.DB().QueryRowContext(ctx, query, schemaID, normalizedName)
+
+	var s Stream
+	var createdAt sql.NullTime
+	var comment, owner sql.NullString
+
+	err := row.Scan(&s.ID, &s.SchemaID, &s.Name, &s.SourceTableID, &s.AppendOnly, &s.ShowInitialRows, &s.ChangelogTable, &s.CurrentOffset, &comment, &createdAt, &owner)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("stream %s not found", normalizedName)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stream: %w", err)
+	}
+
+	if createdAt.Valid {
+		s.CreatedAt = createdAt.Time
+	}
+	if comment.Valid {
+		s.Comment = comment.String
+	}
+	if owner.Valid {
+		s.Owner = owner.String
+	}
+
+	return &s, nil
+}
+
+// GetStreamsBySourceTable returns all streams tracking a given source table.
+func (r *Repository) GetStreamsBySourceTable(ctx context.Context, sourceTableID string) ([]*Stream, error) {
+	query := `SELECT id, schema_id, name, source_table_id, append_only, show_initial_rows, changelog_table, current_offset, comment, created_at, owner
+	          FROM _metadata_streams WHERE source_table_id = ?`
+
+	rows, err := r.mgr.DB().QueryContext(ctx, query, sourceTableID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list streams: %w", err)
+	}
+	defer rows.Close()
+
+	var streams []*Stream
+	for rows.Next() {
+		var s Stream
+		var createdAt sql.NullTime
+		var comment, owner sql.NullString
+
+		if err := rows.Scan(&s.ID, &s.SchemaID, &s.Name, &s.SourceTableID, &s.AppendOnly, &s.ShowInitialRows, &s.ChangelogTable, &s.CurrentOffset, &comment, &createdAt, &owner); err != nil {
+			return nil, fmt.Errorf("failed to scan stream: %w", err)
+		}
+
+		if createdAt.Valid {
+			s.CreatedAt = createdAt.Time
+		}
+		if comment.Valid {
+			s.Comment = comment.String
+		}
+		if owner.Valid {
+			s.Owner = owner.String
+		}
+
+		streams = append(streams, &s)
+	}
+
+	return streams, nil
+}
+
+// ListStreams returns all streams in a schema.
+func (r *Repository) ListStreams(ctx context.Context, schemaID string) ([]*Stream, error) {
+	query := `SELECT id, schema_id, name, source_table_id, append_only, show_initial_rows, changelog_table, current_offset, comment, created_at, owner
+	          FROM _metadata_streams WHERE schema_id = ? ORDER BY name`
+
+	rows, err := r.mgr.DB().QueryContext(ctx, query, schemaID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list streams: %w", err)
+	}
+	defer rows.Close()
+
+	var streams []*Stream
+	for rows.Next() {
+		var s Stream
+		var createdAt sql.NullTime
+		var comment, owner sql.NullString
+
+		if err := rows.Scan(&s.ID, &s.SchemaID, &s.Name, &s.SourceTableID, &s.AppendOnly, &s.ShowInitialRows, &s.ChangelogTable, &s.CurrentOffset, &comment, &createdAt, &owner); err != nil {
+			return nil, fmt.Errorf("failed to scan stream: %w", err)
+		}
+
+		if createdAt.Valid {
+			s.CreatedAt = createdAt.Time
+		}
+		if comment.Valid {
+			s.Comment = comment.String
+		}
+		if owner.Valid {
+			s.Owner = owner.String
+		}
+
+		streams = append(streams, &s)
+	}
+
+	return streams, nil
+}
+
+// DropStream deletes a stream by ID.
+func (r *Repository) DropStream(ctx context.Context, id string) error {
+	query := `DELETE FROM _metadata_streams WHERE id = ?`
+	result, err := r.mgr.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to drop stream: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("stream with ID %s not found", id)
+	}
+
+	return nil
+}
+
+// UpdateStreamOffset updates the stream's current consumption offset.
+func (r *Repository) UpdateStreamOffset(ctx context.Context, id string, offset int64) error {
+	query := `UPDATE _metadata_streams SET current_offset = ? WHERE id = ?`
+	_, err := r.mgr.Exec(ctx, query, offset, id)
+	if err != nil {
+		return fmt.Errorf("failed to update stream offset: %w", err)
+	}
 	return nil
 }
 

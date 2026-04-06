@@ -26,12 +26,13 @@ var (
 
 // Executor executes SQL queries against DuckDB with Snowflake SQL translation.
 type Executor struct {
-	mgr            *connection.Manager
-	repo           *metadata.Repository
-	translator     *Translator
-	copyProcessor  *CopyProcessor
-	mergeProcessor *MergeProcessor
-	catalogMode    bool
+	mgr             *connection.Manager
+	repo            *metadata.Repository
+	translator      *Translator
+	copyProcessor   *CopyProcessor
+	mergeProcessor  *MergeProcessor
+	streamProcessor *StreamProcessor
+	catalogMode     bool
 }
 
 // ExecutorOption configures an Executor.
@@ -48,6 +49,13 @@ func WithCopyProcessor(processor *CopyProcessor) ExecutorOption {
 func WithMergeProcessor(processor *MergeProcessor) ExecutorOption {
 	return func(e *Executor) {
 		e.mergeProcessor = processor
+	}
+}
+
+// WithStreamProcessor sets the Stream processor for executing CREATE/DROP STREAM.
+func WithStreamProcessor(processor *StreamProcessor) ExecutorOption {
+	return func(e *Executor) {
+		e.streamProcessor = processor
 	}
 }
 
@@ -96,6 +104,11 @@ func (e *Executor) Query(ctx context.Context, sql string) (*Result, error) {
 	}
 	if classifier.IsDescribeTable(sql) {
 		return e.queryDescribeTable(ctx, sql)
+	}
+
+	// Intercept SYSTEM$STREAM_HAS_DATA() function
+	if strings.Contains(strings.ToUpper(sql), "SYSTEM$STREAM_HAS_DATA") {
+		return e.queryStreamHasData(ctx, sql)
 	}
 
 	// Translate Snowflake SQL to DuckDB SQL
@@ -383,6 +396,14 @@ func (e *Executor) Execute(ctx context.Context, sql string) (*ExecResult, error)
 		return e.executeMerge(ctx, sql)
 	}
 
+	// Handle CREATE/DROP STREAM statements
+	if IsCreateStream(sql) {
+		return e.executeCreateStream(ctx, sql)
+	}
+	if IsDropStream(sql) {
+		return e.executeDropStream(ctx, sql)
+	}
+
 	// Execute regular SQL statement
 	return e.executeRaw(ctx, sql)
 }
@@ -408,9 +429,85 @@ func (e *Executor) executeRaw(ctx context.Context, sql string) (*ExecResult, err
 		return nil, fmt.Errorf("failed to get rows affected: %w", err)
 	}
 
+	// Stream CDC: record DML changes to tracked tables' changelogs
+	if e.streamProcessor != nil && rowsAffected > 0 {
+		e.recordStreamDMLChange(ctx, sql)
+	}
+
 	return &ExecResult{
 		RowsAffected: rowsAffected,
 	}, nil
+}
+
+// recordStreamDMLChange detects DML type and target table, then records to stream changelogs.
+func (e *Executor) recordStreamDMLChange(ctx context.Context, sql string) {
+	upperSQL := strings.ToUpper(strings.TrimSpace(sql))
+
+	var action string
+	var isUpdate bool
+	var tableName string
+
+	switch {
+	case strings.HasPrefix(upperSQL, "INSERT"):
+		action = "INSERT"
+		tableName = extractTableFromInsert(upperSQL)
+	case strings.HasPrefix(upperSQL, "UPDATE"):
+		action = "INSERT" // UPDATE decomposes to DELETE+INSERT
+		isUpdate = true
+		tableName = extractTableFromUpdate(upperSQL)
+	case strings.HasPrefix(upperSQL, "DELETE"):
+		action = "DELETE"
+		tableName = extractTableFromDelete(upperSQL)
+	default:
+		return
+	}
+
+	if tableName == "" {
+		return
+	}
+
+	// Extract just the table name (last part of qualified name)
+	parts := strings.Split(tableName, ".")
+	bareTable := strings.Trim(parts[len(parts)-1], `"`)
+	// Handle flat naming: SCHEMA_TABLE → TABLE part after last underscore
+	if len(parts) == 2 {
+		schemaPart := parts[1]
+		if idx := strings.Index(schemaPart, "_"); idx > 0 {
+			bareTable = schemaPart[idx+1:]
+		}
+	}
+
+	e.streamProcessor.RecordDMLChange(ctx, bareTable, action, isUpdate)
+}
+
+// extractTableFromInsert extracts table name from INSERT INTO table ...
+func extractTableFromInsert(upperSQL string) string {
+	re := regexp.MustCompile(`(?i)INSERT\s+INTO\s+([^\s(]+)`)
+	matches := re.FindStringSubmatch(upperSQL)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+// extractTableFromUpdate extracts table name from UPDATE table SET ...
+func extractTableFromUpdate(upperSQL string) string {
+	re := regexp.MustCompile(`(?i)UPDATE\s+([^\s]+)\s+SET`)
+	matches := re.FindStringSubmatch(upperSQL)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+// extractTableFromDelete extracts table name from DELETE FROM table ...
+func extractTableFromDelete(upperSQL string) string {
+	re := regexp.MustCompile(`(?i)DELETE\s+FROM\s+([^\s]+)`)
+	matches := re.FindStringSubmatch(upperSQL)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
 }
 
 // executeCreateTable handles CREATE TABLE statements with metadata registration.
@@ -852,6 +949,108 @@ func (e *Executor) describeTableFromMetadata(ctx context.Context, stmt *Describe
 	}
 
 	return &Result{Columns: columns, Rows: rows}, nil
+}
+
+// Stream execution methods
+
+// executeCreateStream handles CREATE STREAM statements.
+func (e *Executor) executeCreateStream(ctx context.Context, sql string) (*ExecResult, error) {
+	if e.streamProcessor == nil {
+		return nil, fmt.Errorf("stream processor not configured")
+	}
+
+	stmt, err := ParseCreateStream(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CREATE STREAM: %w", err)
+	}
+
+	// Resolve schema for the stream
+	schemaID, err := e.resolveSchemaID(ctx, stmt.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve schema: %w", err)
+	}
+
+	return e.streamProcessor.ExecuteCreateStream(ctx, stmt, schemaID)
+}
+
+// executeDropStream handles DROP STREAM statements.
+func (e *Executor) executeDropStream(ctx context.Context, sql string) (*ExecResult, error) {
+	if e.streamProcessor == nil {
+		return nil, fmt.Errorf("stream processor not configured")
+	}
+
+	stmt, err := ParseDropStream(sql)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DROP STREAM: %w", err)
+	}
+
+	schemaID, err := e.resolveSchemaID(ctx, stmt.Schema)
+	if err != nil {
+		if stmt.IfExists {
+			return &ExecResult{RowsAffected: 0}, nil
+		}
+		return nil, fmt.Errorf("failed to resolve schema: %w", err)
+	}
+
+	return e.streamProcessor.ExecuteDropStream(ctx, stmt, schemaID)
+}
+
+// queryStreamHasData handles SELECT SYSTEM$STREAM_HAS_DATA(...).
+func (e *Executor) queryStreamHasData(ctx context.Context, sql string) (*Result, error) {
+	if e.streamProcessor == nil {
+		return nil, fmt.Errorf("stream processor not configured")
+	}
+
+	streamName, err := ParseStreamHasData(sql)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to find stream across all schemas
+	databases, _ := e.repo.ListDatabases(ctx)
+	for _, db := range databases {
+		schemas, _ := e.repo.ListSchemas(ctx, db.ID)
+		for _, schema := range schemas {
+			hasData, err := e.streamProcessor.QueryStreamHasData(ctx, streamName, schema.ID)
+			if err == nil {
+				return &Result{
+					Columns: []string{"HAS_DATA"},
+					Rows:    [][]interface{}{{hasData}},
+				}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("stream %s not found", streamName)
+}
+
+// resolveSchemaID resolves a schema name to its ID, searching all databases.
+func (e *Executor) resolveSchemaID(ctx context.Context, schemaName string) (string, error) {
+	if schemaName == "" {
+		// Use first available schema
+		databases, err := e.repo.ListDatabases(ctx)
+		if err != nil || len(databases) == 0 {
+			return "", fmt.Errorf("no databases found")
+		}
+		schemas, err := e.repo.ListSchemas(ctx, databases[0].ID)
+		if err != nil || len(schemas) == 0 {
+			return "", fmt.Errorf("no schemas found")
+		}
+		return schemas[0].ID, nil
+	}
+
+	// Search for schema by name across all databases
+	databases, err := e.repo.ListDatabases(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, db := range databases {
+		schema, err := e.repo.GetSchemaByName(ctx, db.ID, schemaName)
+		if err == nil {
+			return schema.ID, nil
+		}
+	}
+	return "", fmt.Errorf("schema %s not found", schemaName)
 }
 
 // Catalog mode execution methods
