@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Snowflake Emulator"
+abstract: "A lightweight Snowflake emulator built with Go and DuckDB for local development and CI testing. Implements the gosnowflake wire protocol and Snowflake REST API v2 with Snowflake-to-DuckDB SQL translation, catalog mode, and Streams/CDC emulation."
+type: software
+authors:
+  - name: "satks"
+license: MIT
+repository-code: "https://github.com/satks/snowflake-emulator"
+keywords:
+  - snowflake
+  - duckdb
+  - emulator
+  - sql
+  - testing
+  - golang
+  - cdc
+references:
+  - type: software
+    title: "snowflake-emulator (upstream)"
+    repository-code: "https://github.com/nnnkkk7/snowflake-emulator"
+    authors:
+      - name: "nnnkkk7"

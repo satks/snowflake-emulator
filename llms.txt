@@ -1,0 +1,29 @@
+# Snowflake Emulator
+
+> A lightweight, open-source Snowflake emulator built with Go and DuckDB for local development and CI testing. It implements the gosnowflake wire protocol and Snowflake REST API v2, translates Snowflake SQL to DuckDB SQL (22+ function translations), and emulates catalog databases, internal stages, COPY INTO, MERGE INTO, and Streams/CDC. No Snowflake account or credentials required.
+
+Quick start: `docker run -p 8080:8080 ghcr.io/satks/snowflake-emulator:latest`, then connect with the gosnowflake DSN `user:pass@localhost:8080/TEST_DB/PUBLIC?account=test&protocol=http` or POST SQL to `http://localhost:8080/api/v2/statements`.
+
+Key facts for tools and agents:
+- Languages/clients verified: Go (gosnowflake), Node.js (snowflake-sdk), any HTTP client (REST API v2).
+- Configuration via env vars: PORT (8080), DB_PATH (:memory:), STAGE_DIR (./stages), ENABLE_CATALOG_MODE (false).
+- Catalog mode (ENABLE_CATALOG_MODE=true) enables three-part names (db.schema.table) and CREATE/DROP DATABASE via SQL.
+- Not supported: auth, time travel, tasks, pipes, external stages (S3/Azure/GCS), JavaScript stored procedures, UDFs.
+
+## Docs
+
+- [README](https://github.com/satks/snowflake-emulator/blob/main/README.md): installation, usage, supported SQL operations, function translations, API endpoint reference, limitations
+- [Design decisions](https://github.com/satks/snowflake-emulator/blob/main/design_decisions.md): architecture rationale for Streams/CDC and gap closure
+- [Changelog](https://github.com/satks/snowflake-emulator/blob/main/CHANGELOG.md): release history
+- [AGENTS.md](https://github.com/satks/snowflake-emulator/blob/main/AGENTS.md): repository guide for AI coding agents (build, test, architecture)
+
+## Examples
+
+- [gosnowflake driver example](https://github.com/satks/snowflake-emulator/blob/main/example/gosnowflake/main.go): connect and query from Go
+- [REST API v2 example](https://github.com/satks/snowflake-emulator/blob/main/example/restapi/main.go): submit statements over HTTP
+- [Docker example](https://github.com/satks/snowflake-emulator/blob/main/example/docker/main.go): run the emulator in a container
+
+## Optional
+
+- [Upstream project](https://github.com/nnnkkk7/snowflake-emulator): original repository this fork extends with catalog mode, Streams/CDC, and SDK compatibility
+- [Container image](https://ghcr.io/satks/snowflake-emulator): ghcr.io/satks/snowflake-emulator
