@@ -1,0 +1,857 @@
+openapi: 3.0.3
+info:
+  title: Snowflake Emulator REST API v2
+  description: |
+    Snowflake-compatible SQL REST API served by the Snowflake Emulator
+    (https://github.com/satks/snowflake-emulator) — a lightweight emulator
+    backed by DuckDB for local development and CI testing.
+
+    Mirrors the Snowflake SQL REST API
+    (https://docs.snowflake.com/en/developer-guide/sql-api/) for statements,
+    plus resource management endpoints for databases, schemas, tables, and
+    warehouses. No authentication is required (dev/test tool only).
+
+    The emulator also speaks the gosnowflake wire protocol on `/session/*` and
+    `/queries/*`; those endpoints are driver-internal and not described here —
+    use the official gosnowflake or snowflake-sdk drivers against them.
+
+    Note: `POST /api/v2/statements` returns HTTP 200 even when SQL execution
+    fails; check `code`/`sqlState`/`message` in the response body.
+  version: "2.0"
+  license:
+    name: MIT
+    url: https://github.com/satks/snowflake-emulator/blob/main/LICENSE
+servers:
+  - url: http://localhost:8080
+    description: Local emulator (default port)
+tags:
+  - name: Statements
+    description: Submit and manage SQL statements
+  - name: Databases
+  - name: Schemas
+  - name: Tables
+  - name: Warehouses
+  - name: Health
+
+paths:
+  /api/v2/statements:
+    post:
+      tags: [Statements]
+      operationId: submitStatement
+      summary: Submit a SQL statement for execution
+      description: |
+        Executes Snowflake SQL synchronously (with automatic Snowflake-to-DuckDB
+        translation). Supports parameter bindings (`:1`, `:2`, `?`). SQL
+        execution errors are reported with HTTP 200 and an error `code`,
+        `sqlState`, and `message` in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitStatementRequest'
+            example:
+              statement: "SELECT IFF(1 > 0, 'yes', 'no')"
+              database: TEST_DB
+              schema: PUBLIC
+      responses:
+        '200':
+          description: Statement executed (check body code/sqlState for SQL errors)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v2/statements/{handle}:
+    get:
+      tags: [Statements]
+      operationId: getStatement
+      summary: Get statement status and result
+      parameters:
+        - $ref: '#/components/parameters/handle'
+      responses:
+        '200':
+          description: Statement status and result set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/statements/{handle}/cancel:
+    post:
+      tags: [Statements]
+      operationId: cancelStatement
+      summary: Cancel a running statement
+      parameters:
+        - $ref: '#/components/parameters/handle'
+      responses:
+        '200':
+          description: Statement canceled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelStatementResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/databases:
+    get:
+      tags: [Databases]
+      operationId: listDatabases
+      summary: List databases
+      responses:
+        '200':
+          description: Databases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DatabaseResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      tags: [Databases]
+      operationId: createDatabase
+      summary: Create a database
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatabaseRequest'
+      responses:
+        '201':
+          description: Database created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v2/databases/{database}:
+    get:
+      tags: [Databases]
+      operationId: getDatabase
+      summary: Get a database
+      parameters:
+        - $ref: '#/components/parameters/database'
+      responses:
+        '200':
+          description: Database
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Databases]
+      operationId: alterDatabase
+      summary: Alter a database (comment)
+      parameters:
+        - $ref: '#/components/parameters/database'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlterDatabaseRequest'
+      responses:
+        '200':
+          description: Database updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      tags: [Databases]
+      operationId: deleteDatabase
+      summary: Drop a database
+      parameters:
+        - $ref: '#/components/parameters/database'
+      responses:
+        '204':
+          description: Database dropped
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/v2/databases/{database}/schemas:
+    get:
+      tags: [Schemas]
+      operationId: listSchemas
+      summary: List schemas in a database
+      parameters:
+        - $ref: '#/components/parameters/database'
+      responses:
+        '200':
+          description: Schemas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SchemaResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      tags: [Schemas]
+      operationId: createSchema
+      summary: Create a schema
+      parameters:
+        - $ref: '#/components/parameters/database'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SchemaRequest'
+      responses:
+        '201':
+          description: Schema created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/databases/{database}/schemas/{schema}:
+    get:
+      tags: [Schemas]
+      operationId: getSchema
+      summary: Get a schema
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+      responses:
+        '200':
+          description: Schema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Schemas]
+      operationId: deleteSchema
+      summary: Drop a schema
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+      responses:
+        '204':
+          description: Schema dropped
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/databases/{database}/schemas/{schema}/tables:
+    get:
+      tags: [Tables]
+      operationId: listTables
+      summary: List tables in a schema
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+      responses:
+        '200':
+          description: Tables
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TableResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      tags: [Tables]
+      operationId: createTable
+      summary: Create a table
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TableRequest'
+            example:
+              name: USERS
+              columns:
+                - name: ID
+                  type: NUMBER
+                - name: NAME
+                  type: STRING
+                  nullable: true
+      responses:
+        '201':
+          description: Table created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/databases/{database}/schemas/{schema}/tables/{table}:
+    get:
+      tags: [Tables]
+      operationId: getTable
+      summary: Get a table
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+        - $ref: '#/components/parameters/table'
+      responses:
+        '200':
+          description: Table
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Tables]
+      operationId: alterTable
+      summary: Alter a table (comment)
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+        - $ref: '#/components/parameters/table'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlterTableRequest'
+      responses:
+        '200':
+          description: Table updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      tags: [Tables]
+      operationId: deleteTable
+      summary: Drop a table
+      parameters:
+        - $ref: '#/components/parameters/database'
+        - $ref: '#/components/parameters/schema'
+        - $ref: '#/components/parameters/table'
+      responses:
+        '204':
+          description: Table dropped
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/warehouses:
+    get:
+      tags: [Warehouses]
+      operationId: listWarehouses
+      summary: List warehouses
+      responses:
+        '200':
+          description: Warehouses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WarehouseResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      tags: [Warehouses]
+      operationId: createWarehouse
+      summary: Create a virtual warehouse (in-memory state only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WarehouseRequest'
+      responses:
+        '201':
+          description: Warehouse created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarehouseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v2/warehouses/{warehouse}:
+    get:
+      tags: [Warehouses]
+      operationId: getWarehouse
+      summary: Get a warehouse
+      parameters:
+        - $ref: '#/components/parameters/warehouse'
+      responses:
+        '200':
+          description: Warehouse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarehouseResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Warehouses]
+      operationId: deleteWarehouse
+      summary: Drop a warehouse
+      parameters:
+        - $ref: '#/components/parameters/warehouse'
+      responses:
+        '204':
+          description: Warehouse dropped
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/warehouses/{warehouse}:resume:
+    post:
+      tags: [Warehouses]
+      operationId: resumeWarehouse
+      summary: Resume a suspended warehouse
+      parameters:
+        - $ref: '#/components/parameters/warehouse'
+      responses:
+        '200':
+          description: Warehouse resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarehouseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v2/warehouses/{warehouse}:suspend:
+    post:
+      tags: [Warehouses]
+      operationId: suspendWarehouse
+      summary: Suspend a warehouse
+      parameters:
+        - $ref: '#/components/parameters/warehouse'
+      responses:
+        '200':
+          description: Warehouse suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarehouseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /health:
+    get:
+      tags: [Health]
+      operationId: healthCheck
+      summary: Health check
+      responses:
+        '200':
+          description: Server is healthy
+
+components:
+  parameters:
+    handle:
+      name: handle
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Statement handle returned by submitStatement
+    database:
+      name: database
+      in: path
+      required: true
+      schema:
+        type: string
+    schema:
+      name: schema
+      in: path
+      required: true
+      schema:
+        type: string
+    table:
+      name: table
+      in: path
+      required: true
+      schema:
+        type: string
+    warehouse:
+      name: warehouse
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    SubmitStatementRequest:
+      type: object
+      required: [statement]
+      properties:
+        statement:
+          type: string
+          description: Snowflake SQL statement to execute
+        timeout:
+          type: integer
+          description: Timeout in seconds
+        database:
+          type: string
+        schema:
+          type: string
+        warehouse:
+          type: string
+        role:
+          type: string
+        bindings:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/BindingValue'
+          description: Positional parameter bindings keyed by "1", "2", ...
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+          description: Session parameters
+
+    BindingValue:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          description: FIXED, TEXT, REAL, BOOLEAN, DATE, TIME, TIMESTAMP, ...
+        value:
+          type: string
+          description: String representation of the value
+
+    StatementResponse:
+      type: object
+      properties:
+        resultSetMetaData:
+          $ref: '#/components/schemas/ResultSetMetaData'
+        data:
+          type: array
+          items:
+            type: array
+            items: {}
+          description: Result rows; each row is an array of column values
+        code:
+          type: string
+          description: Snowflake response code ("090001" = success)
+        statementStatusUrl:
+          type: string
+        requestId:
+          type: string
+        sqlState:
+          type: string
+          description: SQL state ("00000" = success, "42000" = error)
+        statementHandle:
+          type: string
+        message:
+          type: string
+        createdOn:
+          type: integer
+          format: int64
+          description: Creation time, epoch milliseconds
+
+    ResultSetMetaData:
+      type: object
+      properties:
+        numRows:
+          type: integer
+          format: int64
+        format:
+          type: string
+          description: Result format (jsonv2)
+        rowType:
+          type: array
+          items:
+            $ref: '#/components/schemas/RowTypeField'
+        partitionInfo:
+          type: array
+          items:
+            $ref: '#/components/schemas/PartitionInfo'
+
+    RowTypeField:
+      type: object
+      properties:
+        name:
+          type: string
+        database:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        type:
+          type: string
+          description: Snowflake type name (fixed, text, boolean, date, ...)
+        length:
+          type: integer
+          format: int64
+        precision:
+          type: integer
+          format: int64
+        scale:
+          type: integer
+          format: int64
+        nullable:
+          type: boolean
+        byteLength:
+          type: integer
+          format: int64
+        collation:
+          type: string
+
+    PartitionInfo:
+      type: object
+      properties:
+        rowCount:
+          type: integer
+          format: int64
+        uncompressedSize:
+          type: integer
+          format: int64
+        compressedSize:
+          type: integer
+          format: int64
+
+    CancelStatementResponse:
+      type: object
+      properties:
+        code:
+          type: string
+        sqlState:
+          type: string
+        message:
+          type: string
+        statementHandle:
+          type: string
+
+    ErrorResponse:
+      type: object
+      description: Error body (same shape as StatementResponse)
+      properties:
+        code:
+          type: string
+        sqlState:
+          type: string
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            type: array
+            items: {}
+
+    DatabaseRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        comment:
+          type: string
+
+    DatabaseResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        comment:
+          type: string
+        owner:
+          type: string
+        created_on:
+          type: string
+
+    AlterDatabaseRequest:
+      type: object
+      properties:
+        comment:
+          type: string
+
+    SchemaRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        comment:
+          type: string
+
+    SchemaResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        database_name:
+          type: string
+        comment:
+          type: string
+        owner:
+          type: string
+        created_on:
+          type: string
+
+    TableRequest:
+      type: object
+      required: [name, columns]
+      properties:
+        name:
+          type: string
+        columns:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ColumnDef'
+        comment:
+          type: string
+
+    ColumnDef:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          description: Snowflake type (NUMBER, STRING, TIMESTAMP_NTZ, VARIANT, ...)
+        nullable:
+          type: boolean
+        default:
+          type: string
+        primary_key:
+          type: boolean
+
+    AlterTableRequest:
+      type: object
+      properties:
+        comment:
+          type: string
+
+    TableResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        database_name:
+          type: string
+        schema_name:
+          type: string
+        table_type:
+          type: string
+          description: BASE TABLE, VIEW, ...
+        comment:
+          type: string
+        owner:
+          type: string
+        created_on:
+          type: string
+        row_count:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          format: int64
+
+    WarehouseRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        warehouse_size:
+          type: string
+          description: X-SMALL, SMALL, MEDIUM, LARGE, ...
+        auto_suspend:
+          type: integer
+          description: Auto-suspend after N seconds
+        auto_resume:
+          type: boolean
+        comment:
+          type: string
+
+    WarehouseResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+          description: STARTED, SUSPENDED, RESUMING, SUSPENDING
+        size:
+          type: string
+        type:
+          type: string
+          description: STANDARD, SNOWPARK-OPTIMIZED
+        auto_suspend:
+          type: integer
+        auto_resume:
+          type: boolean
+        comment:
+          type: string
+        owner:
+          type: string
+        created_on:
+          type: string

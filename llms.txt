@@ -16,6 +16,7 @@ Key facts for tools and agents:
 - [Design decisions](https://github.com/satks/snowflake-emulator/blob/main/design_decisions.md): architecture rationale for Streams/CDC and gap closure
 - [Changelog](https://github.com/satks/snowflake-emulator/blob/main/CHANGELOG.md): release history
 - [AGENTS.md](https://github.com/satks/snowflake-emulator/blob/main/AGENTS.md): repository guide for AI coding agents (build, test, architecture)
+- [OpenAPI spec](https://github.com/satks/snowflake-emulator/blob/main/api/openapi.yaml): machine-readable OpenAPI 3.0 definition of the REST API v2 (statements, databases, schemas, tables, warehouses)
 
 ## Examples
 

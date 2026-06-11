@@ -245,6 +245,8 @@ DESCRIBE TABLE my_db.analytics.events;
 
 ## API Endpoints
 
+A machine-readable [OpenAPI 3.0 spec](api/openapi.yaml) is available for the REST API v2.
+
 ### gosnowflake Protocol
 
 | Endpoint | Method | Description |
